@@ -7,10 +7,66 @@ const API_KEY = process.env.API_KEY || '';
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 const MODEL_FAST = 'gemini-2.5-flash';
+const FALLBACK_API_BASE = 'https://arshenoy-somai-backend.hf.space';
 
 // --- HELPER TO CLEAN MARKDOWN ---
 const cleanText = (text: string) => {
   return text.replace(/\*\*/g, '').replace(/###/g, '').replace(/\*/g, '-').trim();
+};
+
+// --- FALLBACK HANDLER ---
+const callFallbackAPI = async (endpoint: string, payload: any): Promise<string> => {
+  // REQUIREMENT: Prominent User Notification
+  alert("⚠ Warning: Primary AI service is at capacity. Switching to backup service. Responses may be slower.");
+  console.warn("Switching to Fallback API:", `${FALLBACK_API_BASE}${endpoint}`);
+
+  try {
+    const response = await fetch(`${FALLBACK_API_BASE}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Fallback API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    // Support various common return keys for simple LLM backends
+    return data.text || data.response || data.generated_text || JSON.stringify(data);
+  } catch (error) {
+    console.error("Fallback API failed:", error);
+    throw error;
+  }
+};
+
+// --- HELPER TO MAP RESPONSE TO RESULT ---
+const parseRiskResponse = (text: string, calculatedScore: number): RiskAnalysisResult => {
+  try {
+    // Attempt to find JSON object in text (in case of extra text around it)
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const jsonStr = jsonMatch ? jsonMatch[0] : text;
+    const data = JSON.parse(jsonStr);
+
+    const pipeline = [
+      { code: data.primaryConditionCode?.code || "N/A", description: data.primaryConditionCode?.description || "Unknown", type: 'Primary' },
+      ...(data.historyCodes || []).map((h: any) => ({ code: h.code, description: h.description, type: 'History' }))
+    ];
+
+    const legacyCodes = [data.primaryConditionCode?.code, ...(data.historyCodes || []).map((h: any) => h.code)].filter(Boolean);
+
+    return {
+      numericScore: calculatedScore,
+      summary: cleanText(data.summary || "Analysis completed."),
+      actionItems: (data.actionItems || []).map(cleanText),
+      icd10Codes: legacyCodes,
+      codingPipeline: pipeline as any,
+      insuranceNote: cleanText(data.insuranceNote || "Review required."),
+      timestamp: new Date().toISOString()
+    };
+  } catch (e) {
+    throw new Error("Failed to parse analysis data");
+  }
 };
 
 export const analyzeRisk = async (
@@ -18,8 +74,6 @@ export const analyzeRisk = async (
   vitals: ClinicalVitals, 
   calculatedScore: number
 ): Promise<RiskAnalysisResult> => {
-  if (!API_KEY) throw new Error("API Key missing");
-
   const prompt = `
     Act as a Senior Clinical Risk Assessor and Certified Medical Coder.
     Analyze the following patient data to generate a clinical report and an ICD-10 coding pipeline.
@@ -49,7 +103,21 @@ export const analyzeRisk = async (
     Return strict JSON.
   `;
 
+  // Default Error Object
+  const returnError = () => ({
+    numericScore: calculatedScore,
+    summary: "Clinical analysis currently unavailable.",
+    actionItems: ["Monitor daily vitals", "Consult healthcare provider"],
+    icd10Codes: ["R69"],
+    codingPipeline: [{ code: "R69", description: "Unspecified illness", type: "Primary" } as any],
+    insuranceNote: "Automated risk assessment pending professional review.",
+    timestamp: new Date().toISOString()
+  });
+
   try {
+    // 1. Try Gemini API
+    if (!API_KEY) throw new Error("API Key missing");
+
     const response = await ai.models.generateContent({
       model: MODEL_FAST,
       contents: prompt,
@@ -81,40 +149,20 @@ export const analyzeRisk = async (
       }
     });
 
-    const text = response.text;
-    if (!text) throw new Error("No response from AI");
+    if (!response.text) throw new Error("No response from AI");
+    return parseRiskResponse(response.text, calculatedScore);
+
+  } catch (primaryError) {
+    console.warn("Primary API Failed (Analyze Risk). Attempting fallback...", primaryError);
     
-    const data = JSON.parse(text);
-
-    // Map to new pipeline structure
-    const pipeline = [
-      { code: data.primaryConditionCode.code, description: data.primaryConditionCode.description, type: 'Primary' },
-      ...(data.historyCodes || []).map((h: any) => ({ code: h.code, description: h.description, type: 'History' }))
-    ];
-
-    // Legacy support for tags
-    const legacyCodes = [data.primaryConditionCode.code, ...(data.historyCodes || []).map((h: any) => h.code)];
-
-    return {
-      numericScore: calculatedScore,
-      summary: cleanText(data.summary),
-      actionItems: data.actionItems.map(cleanText),
-      icd10Codes: legacyCodes,
-      codingPipeline: pipeline as any,
-      insuranceNote: cleanText(data.insuranceNote),
-      timestamp: new Date().toISOString()
-    };
-  } catch (error) {
-    console.error("Analysis Failed", error);
-    return {
-      numericScore: calculatedScore,
-      summary: "Clinical analysis currently unavailable.",
-      actionItems: ["Monitor daily vitals", "Consult healthcare provider"],
-      icd10Codes: ["R69"],
-      codingPipeline: [{ code: "R69", description: "Unspecified illness", type: "Primary" }],
-      insuranceNote: "Automated risk assessment pending professional review.",
-      timestamp: new Date().toISOString()
-    };
+    try {
+      // 2. Try Fallback API
+      const fallbackText = await callFallbackAPI('/analyze', { prompt });
+      return parseRiskResponse(fallbackText, calculatedScore);
+    } catch (fallbackError) {
+      console.error("All APIs failed for analyzeRisk", fallbackError);
+      return returnError();
+    }
   }
 };
 
@@ -125,8 +173,6 @@ export const generateChatResponse = async (
   profile: PatientProfile,
   mode: AppMode
 ): Promise<string> => {
-  if (!API_KEY) return "System Error: API Key is missing.";
-
   const baseContext = `
     Context:
     Patient: ${profile.name} (${profile.age}y)
@@ -151,11 +197,13 @@ export const generateChatResponse = async (
        - If it's a lab report: Explain the numbers in plain English.`;
 
   try {
+    // 1. Try Gemini API
+    if (!API_KEY) throw new Error("API Key missing");
+
     // Convert history to Gemini format
     const chatContents = history.map(msg => {
       const parts: any[] = [{ text: msg.text }];
       if (msg.image) {
-        // Strip header if present
         const base64 = msg.image.includes('base64,') ? msg.image.split('base64,')[1] : msg.image;
         parts.push({ inlineData: { mimeType: 'image/jpeg', data: base64 } });
       }
@@ -175,7 +223,6 @@ export const generateChatResponse = async (
       }
     });
 
-    // Prepare current message parts
     const messageParts: any[] = [{ text: currentMessage }];
     if (currentImage) {
        const base64 = currentImage.includes('base64,') ? currentImage.split('base64,')[1] : currentImage;
@@ -184,9 +231,23 @@ export const generateChatResponse = async (
 
     const result = await chat.sendMessage({ message: messageParts });
     return cleanText(result.text || "I'm having trouble retrieving that information.");
-  } catch (error) {
-    console.error("Chat Error", error);
-    return "I apologize, but I am unable to connect at the moment. Please try again.";
+
+  } catch (primaryError) {
+    console.warn("Primary API Failed (Chat). Attempting fallback...", primaryError);
+
+    try {
+      // 2. Try Fallback API
+      // Construct a text prompt since fallback (Phi-3) likely expects text rather than structured objects
+      const historyText = history.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n');
+      const fullPrompt = `${systemInstruction}\n\nChat History:\n${historyText}\nUser: ${currentMessage}\n${currentImage ? '[Image Context Provided]' : ''}\nAssistant:`;
+      
+      const fallbackResponse = await callFallbackAPI('/generate', { prompt: fullPrompt });
+      return cleanText(fallbackResponse);
+
+    } catch (fallbackError) {
+      console.error("All APIs failed for chat", fallbackError);
+      return "I apologize, but I am unable to connect at the moment. Please check your internet connection or try again later.";
+    }
   }
 };
 

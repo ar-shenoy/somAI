@@ -1,0 +1,7 @@
+{
+  "name": "SomAI - Patient Education Companion",
+  "description": "A non-clinical AI guide educating patients about their condition, risks, triggers, and mental empowerment using Gemini API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

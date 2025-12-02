@@ -2,8 +2,28 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { PatientProfile, ClinicalVitals, AppMode, RiskAnalysisResult, ChatMessage } from "../types";
 
-const API_KEY = process.env.API_KEY || '';
+// --- API KEY & CLIENT INITIALIZATION ---
+const getApiKey = () => {
+  // 1. Try Vite Environment (Client-side) - This is key for HF Docker + Vite
+  try {
+    // @ts-ignore
+    if (import.meta.env && import.meta.env.VITE_API_KEY) {
+      // @ts-ignore
+      return import.meta.env.VITE_API_KEY;
+    }
+  } catch (e) {
+    // Ignore error if import.meta is not available
+  }
+  
+  // 2. Try Node Environment (Server-side fallback)
+  if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+    return process.env.API_KEY;
+  }
 
+  return '';
+};
+
+const API_KEY = getApiKey();
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 const MODEL_FAST = 'gemini-2.5-flash';
@@ -11,31 +31,70 @@ const FALLBACK_API_BASE = 'https://arshenoy-somai-backend.hf.space';
 
 // --- HELPER TO CLEAN MARKDOWN ---
 const cleanText = (text: string) => {
+  if (!text) return "";
+  // Removes **, ###, and converts * bullets to -
   return text.replace(/\*\*/g, '').replace(/###/g, '').replace(/\*/g, '-').trim();
 };
 
 // --- FALLBACK HANDLER ---
 const callFallbackAPI = async (endpoint: string, payload: any): Promise<string> => {
-  // REQUIREMENT: Prominent User Notification
-  alert("⚠ Warning: Primary AI service is at capacity. Switching to backup service. Responses may be slower.");
-  console.warn("Switching to Fallback API:", `${FALLBACK_API_BASE}${endpoint}`);
+  console.warn(`[System] Switching to Fallback API: ${FALLBACK_API_BASE}${endpoint}`);
+
+  // Helper to make the fetch request with timeout and proper CORS settings
+  // Increased retries to 2 to handle stubborn cold starts
+  const makeRequest = async (retries = 2) => {
+    const controller = new AbortController();
+    // INCREASED TIMEOUT: 60 seconds to accommodate Hugging Face Space cold starts
+    const timeoutId = setTimeout(() => controller.abort(), 60000); 
+
+    try {
+      const response = await fetch(`${FALLBACK_API_BASE}${endpoint}`, {
+        method: 'POST',
+        mode: 'cors', 
+        credentials: 'omit', // CRITICAL: Fixes CORS on HF Spaces
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      // Handle Cold Starts (503 Service Unavailable or 504 Gateway Timeout)
+      if (!response.ok && (response.status === 503 || response.status === 504) && retries > 0) {
+        console.warn(`Backend waking up (${response.status}). Retrying in 5s...`);
+        await new Promise(r => setTimeout(r, 5000)); // Increased wait time between retries
+        return makeRequest(retries - 1);
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        // Check for HTML response (common when HF space is building/error page)
+        if (errText.trim().startsWith('<')) {
+           throw new Error(`Backend unavailable (Status ${response.status}). Space might be building/sleeping.`);
+        }
+        throw new Error(`API Error ${response.status}: ${errText.substring(0, 100)}`);
+      }
+
+      const data = await response.json();
+      return data.text || data.response || data.generated_text || JSON.stringify(data);
+    } catch (error: any) {
+      clearTimeout(timeoutId);
+      // Retry on network/timeout errors if we have retries left
+      if (retries > 0 && (error.name === 'AbortError' || error.message.includes('Failed to fetch'))) {
+         console.warn(`Network/Timeout error. Retrying in 5s...`);
+         await new Promise(r => setTimeout(r, 5000));
+         return makeRequest(retries - 1);
+      }
+      throw error;
+    }
+  };
 
   try {
-    const response = await fetch(`${FALLBACK_API_BASE}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error(`Fallback API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    // Support various common return keys for simple LLM backends
-    return data.text || data.response || data.generated_text || JSON.stringify(data);
+    return await makeRequest();
   } catch (error) {
-    console.error("Fallback API failed:", error);
+    console.error("Fallback API Connection Failed:", error);
     throw error;
   }
 };
@@ -43,7 +102,6 @@ const callFallbackAPI = async (endpoint: string, payload: any): Promise<string> 
 // --- HELPER TO MAP RESPONSE TO RESULT ---
 const parseRiskResponse = (text: string, calculatedScore: number): RiskAnalysisResult => {
   try {
-    // Attempt to find JSON object in text (in case of extra text around it)
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     const jsonStr = jsonMatch ? jsonMatch[0] : text;
     const data = JSON.parse(jsonStr);
@@ -77,7 +135,6 @@ export const analyzeRisk = async (
   const prompt = `
     Act as a Senior Clinical Risk Assessor and Certified Medical Coder.
     Analyze the following patient data to generate a clinical report and an ICD-10 coding pipeline.
-
     Patient Profile:
     - Age: ${profile.age}
     - Primary Condition: ${profile.condition}
@@ -91,19 +148,18 @@ export const analyzeRisk = async (
     - Adherence: ${vitals.missedDoses} missed doses in 7 days.
     
     Algo-Calculated Risk Score: ${calculatedScore}/100.
-
     Task:
     1. Clinical Summary: 1-2 sentences explaining the risk level based on vitals.
     2. Action Items: 3 specific lifestyle changes.
     3. Coding Pipeline:
        - Extract the ICD-10-CM code for the Primary Condition.
        - Analyze the "Patient History Text" and extract ICD-10-CM codes for any mention of past diseases (e.g., "history of heart attack" -> Z86.74 or I25.2). If history is empty/none, ignore.
-    4. Insurance Justification: A professional one-sentence note justifying medical necessity for monitoring (e.g., "Patient requires monitoring due to uncontrolled hypertension and high risk of cardiovascular event.").
+    4. Insurance Justification: A professional one-sentence note justifying medical necessity for monitoring.
     
     Return strict JSON.
   `;
 
-  // Default Error Object
+  // Default Error Object for complete failure
   const returnError = () => ({
     numericScore: calculatedScore,
     summary: "Clinical analysis currently unavailable.",
@@ -115,7 +171,6 @@ export const analyzeRisk = async (
   });
 
   try {
-    // 1. Try Gemini API
     if (!API_KEY) throw new Error("API Key missing");
 
     const response = await ai.models.generateContent({
@@ -127,10 +182,7 @@ export const analyzeRisk = async (
           type: Type.OBJECT,
           properties: {
             summary: { type: Type.STRING },
-            actionItems: { 
-              type: Type.ARRAY, 
-              items: { type: Type.STRING } 
-            },
+            actionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
             primaryConditionCode: {
               type: Type.OBJECT,
               properties: { code: {type: Type.STRING}, description: {type: Type.STRING} }
@@ -152,11 +204,16 @@ export const analyzeRisk = async (
     if (!response.text) throw new Error("No response from AI");
     return parseRiskResponse(response.text, calculatedScore);
 
-  } catch (primaryError) {
-    console.warn("Primary API Failed (Analyze Risk). Attempting fallback...", primaryError);
+  } catch (primaryError: any) {
+    const errorStr = primaryError.toString();
+    // Check if it's a Quota Limit (429) or other API error
+    if (errorStr.includes('429') || errorStr.includes('Quota')) {
+        console.warn("⚠️ GEMINI QUOTA EXCEEDED. Switching to Phi-3 Backend.");
+    } else {
+        console.warn("Gemini API Error. Switching to Backend.", primaryError);
+    }
     
     try {
-      // 2. Try Fallback API
       const fallbackText = await callFallbackAPI('/analyze', { prompt });
       return parseRiskResponse(fallbackText, calculatedScore);
     } catch (fallbackError) {
@@ -179,43 +236,35 @@ export const generateChatResponse = async (
     Condition: ${profile.condition}
     History: ${profile.history}
     
-    IMPORTANT FORMATTING RULE: Return ONLY plain text. Do NOT use Markdown, bolding (**), italics, headers (###), or bullet points (*). Use simple dashes (-) for lists if needed.
+    Formatting: Plain text only. No markdown.
   `;
 
   const systemInstruction = mode === AppMode.THERAPY
-    ? `You are SomAI, a Cognitive Behavioral Therapy (CBT) Companion.
-       ${baseContext}
-       Use CBT techniques. Be empathetic. Ask open-ended questions. DO NOT give medical advice.`
-    : `You are SomAI, an Advanced Medical Education Assistant.
-       ${baseContext}
-       Explain medical concepts in plain English. Use analogies. Focus on the "Why" and "How".
-       
-       VISION CAPABILITIES:
-       If the user provides an image, analyze it.
-       - If it's a nutrition label: Analyze sugar/sodium for the patient's condition.
-       - If it's a skin issue/symptom: Describe it and suggest standard care (disclaimer: not a diagnosis).
-       - If it's a lab report: Explain the numbers in plain English.`;
+    ? `You are SomAI, a CBT Companion. ${baseContext} Use CBT techniques. Be empathetic.`
+    : `You are SomAI, a Medical Education Assistant. ${baseContext} Explain concepts clearly. If image provided, analyze it.`;
 
   try {
-    // 1. Try Gemini API
     if (!API_KEY) throw new Error("API Key missing");
 
-    // Convert history to Gemini format
-    const chatContents = history.map(msg => {
-      const parts: any[] = [{ text: msg.text }];
-      if (msg.image) {
-        const base64 = msg.image.includes('base64,') ? msg.image.split('base64,')[1] : msg.image;
-        parts.push({ inlineData: { mimeType: 'image/jpeg', data: base64 } });
-      }
-      return {
-        role: msg.role === 'user' ? 'user' : 'model',
-        parts: parts
-      };
+    const contents: any[] = history.map(msg => {
+       const parts: any[] = [{ text: msg.text }];
+       if (msg.image) {
+         const base64 = msg.image.includes('base64,') ? msg.image.split('base64,')[1] : msg.image;
+         parts.push({ inlineData: { mimeType: 'image/jpeg', data: base64 } });
+       }
+       return { role: msg.role === 'user' ? 'user' : 'model', parts };
     });
 
-    const chat = ai.chats.create({
+    const currentParts: any[] = [{ text: currentMessage }];
+    if (currentImage) {
+        const base64 = currentImage.includes('base64,') ? currentImage.split('base64,')[1] : currentImage;
+        currentParts.push({ inlineData: { mimeType: 'image/jpeg', data: base64 } });
+    }
+    contents.push({ role: 'user', parts: currentParts });
+
+    const response = await ai.models.generateContent({
       model: MODEL_FAST,
-      history: chatContents,
+      contents: contents,
       config: {
         systemInstruction: systemInstruction,
         temperature: 0.5,
@@ -223,23 +272,23 @@ export const generateChatResponse = async (
       }
     });
 
-    const messageParts: any[] = [{ text: currentMessage }];
-    if (currentImage) {
-       const base64 = currentImage.includes('base64,') ? currentImage.split('base64,')[1] : currentImage;
-       messageParts.push({ inlineData: { mimeType: 'image/jpeg', data: base64 } });
+    return cleanText(response.text || "I'm having trouble retrieving that information.");
+
+  } catch (primaryError: any) {
+    const errorStr = primaryError.toString();
+    if (errorStr.includes('429') || errorStr.includes('Quota')) {
+        console.warn("⚠️ GEMINI QUOTA EXCEEDED. Switching to Phi-3 Backend.");
+    } else {
+        console.warn("Gemini API Error. Switching to Backend.", primaryError);
     }
 
-    const result = await chat.sendMessage({ message: messageParts });
-    return cleanText(result.text || "I'm having trouble retrieving that information.");
-
-  } catch (primaryError) {
-    console.warn("Primary API Failed (Chat). Attempting fallback...", primaryError);
-
     try {
-      // 2. Try Fallback API
-      // Construct a text prompt since fallback (Phi-3) likely expects text rather than structured objects
-      const historyText = history.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n');
-      const fullPrompt = `${systemInstruction}\n\nChat History:\n${historyText}\nUser: ${currentMessage}\n${currentImage ? '[Image Context Provided]' : ''}\nAssistant:`;
+      // --- FALLBACK LOGIC ---
+      // Truncate history to prevent 400/500 errors from backend context limits
+      const recentHistory = history.slice(-6); 
+      const historyText = recentHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n');
+      
+      const fullPrompt = `${systemInstruction}\n\n[Recent Chat History]:\n${historyText}\nUser: ${currentMessage}\n${currentImage ? '[Image Context Provided]' : ''}\nAssistant:`;
       
       const fallbackResponse = await callFallbackAPI('/generate', { prompt: fullPrompt });
       return cleanText(fallbackResponse);
@@ -255,7 +304,7 @@ export const generateQuickReplies = async (
   lastAiMessage: string
 ): Promise<string[]> => {
   if (!API_KEY) return [];
-  const prompt = `Based on this AI response: "${lastAiMessage}", generate 3 short, relevant quick reply options for the user to continue the conversation. Return ONLY a JSON array of strings. Example: ["Tell me more", "What should I avoid?", "Thanks"]`;
+  const prompt = `Based on this AI response: "${lastAiMessage}", generate 3 short, relevant quick reply options. Return JSON array of strings.`;
   
   try {
     const response = await ai.models.generateContent({
@@ -278,7 +327,6 @@ export const generateQuickReplies = async (
 export const summarizeConversation = async (
   history: ChatMessage[]
 ): Promise<string> => {
-  if (!API_KEY) return "System Error: API Key is missing.";
   if (history.length === 0) return "No conversation to summarize.";
 
   const historyText = history.map(msg => 
@@ -288,13 +336,25 @@ export const summarizeConversation = async (
   const prompt = `Create a professional clinical note summarizing this conversation. Include: Chief Complaint, Topics Discussed, and Patient Sentiment. Format as a single paragraph plain text. No markdown.\n\n${historyText}`;
 
   try {
+    if (!API_KEY) throw new Error("API Key missing");
+
     const response = await ai.models.generateContent({
       model: MODEL_FAST,
       contents: prompt,
     });
     return cleanText(response.text || "Summary not available.");
   } catch (error) {
-    console.error("Summarization Error", error);
-    return "Could not generate summary.";
+    try {
+        const shortHistoryText = history.slice(-10).map(msg => 
+            `${msg.role === 'user' ? 'Patient' : 'AI'}: ${msg.text}`
+        ).join('\n');
+        const shortPrompt = `Summarize conversation:\n${shortHistoryText}`;
+        
+        const fallbackResponse = await callFallbackAPI('/generate', { prompt: shortPrompt });
+        return cleanText(fallbackResponse);
+    } catch (fallbackError) {
+        console.error("Summarization Error", fallbackError);
+        return "Could not generate summary.";
+    }
   }
 };

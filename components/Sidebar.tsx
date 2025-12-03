@@ -1,10 +1,10 @@
 
 import React from 'react';
-import { Activity, MessageSquare, User, Pill } from 'lucide-react';
+import { Activity, MessageSquare, Pill } from 'lucide-react';
 
 interface SidebarProps {
-  activeTab: 'dashboard' | 'chat' | 'profile' | 'medication';
-  setActiveTab: (tab: 'dashboard' | 'chat' | 'profile' | 'medication') => void;
+  activeTab: 'dashboard' | 'chat' | 'medication';
+  setActiveTab: (tab: 'dashboard' | 'chat' | 'medication') => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
@@ -12,7 +12,6 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
     { id: 'chat', label: 'AI Companion', icon: MessageSquare },
     { id: 'medication', label: 'Meds & Rewards', icon: Pill },
-    { id: 'profile', label: 'Patient Profile', icon: User },
   ] as const;
 
   return (
@@ -24,7 +23,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
           </div>
           SomAI
         </h1>
-        <p className="text-xs text-gray-400 mt-3 font-medium tracking-wide">CLINICAL COMPANION v1.0</p>
+        <p className="text-xs text-gray-400 mt-3 font-medium tracking-wide">CLINICAL COMPANION v2.0</p>
       </div>
       
       <nav className="flex-1 px-4 space-y-2 mt-4">

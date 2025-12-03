@@ -1,7 +1,6 @@
-
 import React from 'react';
 import { PatientProfile, ClinicalVitals, RiskAnalysisResult, ChatMessage, Medication } from '../types';
-import { FileText, User, Activity, Pill, MessageSquare, ShieldCheck } from 'lucide-react';
+import { FileText, User, Activity, Pill, MessageSquare, ShieldCheck, Zap, Server } from 'lucide-react';
 
 interface ReportViewProps {
   profile: PatientProfile;
@@ -42,10 +41,16 @@ const ReportView: React.FC<ReportViewProps> = ({
 
             {/* Vitals & Risk */}
             <section>
-                <h3 className="text-sm font-mono font-bold text-gray-400 uppercase mb-4 border-b border-white/5 pb-2 flex items-center gap-2">
-                    <Activity size={16} /> Clinical Analysis
+                <h3 className="text-sm font-mono font-bold text-gray-400 uppercase mb-4 border-b border-white/5 pb-2 flex items-center gap-2 justify-between">
+                    <div className="flex items-center gap-2"><Activity size={16} /> Clinical Analysis</div>
+                    {riskResult?.source && (
+                        <span className="text-[10px] font-mono font-medium text-gray-500 flex items-center gap-1 bg-white/5 px-2 py-0.5 rounded">
+                            {riskResult.source.includes('Gemini') ? <Zap size={10}/> : <Server size={10}/>}
+                            {riskResult.source}
+                        </span>
+                    )}
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
                      <div className="bg-white/5 p-3 rounded-lg text-center border border-white/5">
                         <span className="text-gray-500 text-xs block">Systolic BP</span>
                         <span className="font-mono font-bold text-neon-green text-lg">{vitals.systolicBp}</span>
@@ -53,6 +58,10 @@ const ReportView: React.FC<ReportViewProps> = ({
                      <div className="bg-white/5 p-3 rounded-lg text-center border border-white/5">
                         <span className="text-gray-500 text-xs block">Glucose</span>
                         <span className="font-mono font-bold text-neon-yellow text-lg">{vitals.glucose}</span>
+                     </div>
+                     <div className="bg-white/5 p-3 rounded-lg text-center border border-white/5">
+                        <span className="text-gray-500 text-xs block">SpO2</span>
+                        <span className={`font-mono font-bold text-lg ${vitals.spo2 < 95 ? 'text-neon-red' : 'text-cyan-400'}`}>{vitals.spo2}%</span>
                      </div>
                      <div className="bg-white/5 p-3 rounded-lg text-center border border-white/5">
                         <span className="text-gray-500 text-xs block">Risk Score</span>

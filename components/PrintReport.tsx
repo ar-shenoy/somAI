@@ -86,8 +86,9 @@ const PrintReport: React.FC<PrintReportProps> = ({
                <span className="text-[10px] text-gray-500">mg/dL</span>
              </div>
              <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 flex flex-col items-center justify-center text-center">
-               <span className="text-[10px] font-bold text-gray-400 uppercase">Sleep Quality</span>
-               <span className="text-2xl font-black text-gray-900">{vitals.sleepQuality}<span className="text-sm text-gray-400">/10</span></span>
+               <span className="text-[10px] font-bold text-gray-400 uppercase">SpO2</span>
+               <span className={`text-2xl font-black ${vitals.spo2 < 95 ? 'text-red-600' : 'text-green-600'}`}>{vitals.spo2}%</span>
+               <span className="text-[10px] text-gray-500">Saturation</span>
              </div>
              <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 flex flex-col items-center justify-center text-center">
                <span className="text-[10px] font-bold text-gray-400 uppercase">Risk Score</span>

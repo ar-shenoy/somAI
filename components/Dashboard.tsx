@@ -137,7 +137,21 @@ const Dashboard: React.FC<DashboardProps> = ({
     ? Math.round((medications.filter(m => m.taken).length / medications.length) * 100) 
     : 0;
 
-  const daysSinceCheckup = Math.floor((new Date().getTime() - new Date(profile.lastCheckup).getTime()) / (1000 * 3600 * 24));
+  // IMPROVED TIME CALCULATION
+  const getDaysSinceCheckup = () => {
+      const last = new Date(profile.lastCheckup);
+      const now = new Date();
+      // Set to midnight to compare days properly
+      last.setHours(0,0,0,0);
+      now.setHours(0,0,0,0);
+      
+      const diffTime = now.getTime() - last.getTime();
+      const diffDays = Math.round(diffTime / (1000 * 3600 * 24));
+      
+      if (diffDays === 0) return 'Today';
+      if (diffDays === 1) return 'Yesterday';
+      return `${diffDays} days ago`;
+  };
 
   const anomalyCount = [
     getVitalStatus('systolicBp', vitals.systolicBpMorning),
@@ -177,8 +191,8 @@ const Dashboard: React.FC<DashboardProps> = ({
             <p className="text-xl font-bold text-white mt-1">{profile.streak} Days</p>
          </div>
          <div className="glass-card p-4 rounded-xl border-l-4 border-l-purple-500">
-            <p className="text-[10px] uppercase font-bold text-gray-500">Last Checkup</p>
-            <p className="text-xl font-bold text-white mt-1">{daysSinceCheckup} days ago</p>
+            <p className="text-[10px] uppercase font-bold text-gray-500">Last Analysis</p>
+            <p className="text-xl font-bold text-white mt-1">{getDaysSinceCheckup()}</p>
          </div>
       </div>
 

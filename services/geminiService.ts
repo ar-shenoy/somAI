@@ -18,33 +18,24 @@ const getApiKey = () => {
 };
 
 // --- BACKEND CONFIGURATION ---
-// Primary Backend (Text Logic - Phi-3)
-const PRIMARY_API_BASE = 'https://arshenoy-somai-backend.hf.space';
+// Primary Backend (Text Logic - Phi-3 Mini)
+const TEXT_BACKEND_BASE: string = 'https://arshenoy-somai-backend.hf.space';
 
 // Secondary Backend (Media - Moondream/Whisper)
-// If you create a new space, put its URL here (e.g. via VITE_MEDIA_API_URL env var), 
-// otherwise it defaults to the primary one.
-const getMediaApiBase = () => {
-  try {
-    // @ts-ignore
-    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_MEDIA_API_URL) {
-      // @ts-ignore
-      return import.meta.env.VITE_MEDIA_API_URL;
-    }
-  } catch (e) {}
-  return PRIMARY_API_BASE;
-};
-
-const MEDIA_API_BASE = getMediaApiBase();
+const MEDIA_BACKEND_BASE: string = 'https://arshenoy-somai-media.hf.space';
 
 const API_KEY = getApiKey();
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 // --- TIERED MODEL STRATEGY ---
-const MODEL_TIER_1 = 'gemini-2.5-flash-lite'; 
-const MODEL_TIER_2 = 'gemini-2.5-flash'; 
-const MODEL_TTS = 'gemini-2.5-flash-preview-tts';
+// 1. Primary: Gemini 2.5 Flash (Highest Quality/Speed Balance)
+// 2. Secondary: Gemini 2.5 Flash Lite (Quota Rescue / Higher Throughput)
+// 3. Tertiary: Local/HuggingFace Backends (Privacy/Offline/No-Quota Fallback)
+const MODEL_PRIMARY = 'gemini-2.5-flash'; 
+const MODEL_SECONDARY = 'gemini-2.5-flash-lite'; 
+const MODEL_TTS = 'gemini-2.5-flash-tts';
 
+// --- UTILITIES ---
 const cleanText = (text: string) => {
   if (!text) return "";
   return text.replace(/\*\*/g, '').replace(/###/g, '').replace(/\*/g, '-').trim();
@@ -74,10 +65,10 @@ const compressImage = async (base64Str: string, maxWidth = 800): Promise<string>
 
 export const wakeUpBackend = async () => {
   try {
-    // Ping both potential backends
-    fetch(`${PRIMARY_API_BASE}/`, { method: 'GET', mode: 'cors' }).catch(()=>{});
-    if (PRIMARY_API_BASE !== MEDIA_API_BASE) {
-      fetch(`${MEDIA_API_BASE}/`, { method: 'GET', mode: 'cors' }).catch(()=>{});
+    // Ping both backends to cold-start them
+    fetch(`${TEXT_BACKEND_BASE}/`, { method: 'GET', mode: 'cors' }).catch(()=>{});
+    if (TEXT_BACKEND_BASE !== MEDIA_BACKEND_BASE) {
+      fetch(`${MEDIA_BACKEND_BASE}/`, { method: 'GET', mode: 'cors' }).catch(()=>{});
     }
   } catch (e) {}
 };
@@ -86,11 +77,11 @@ export const wakeUpBackend = async () => {
 const callBackend = async (baseUrl: string, endpoint: string, payload: any, onStatus?: (msg: string) => void): Promise<string> => {
   const url = `${baseUrl}${endpoint}`;
   console.info(`[SomAI] Calling Backend: ${url}`);
-  if (onStatus) onStatus("🐢 Switching to local backup...");
+  if (onStatus) onStatus("🐢 Switching to custom cloud node...");
   
-  const makeRequest = async (retries = 2) => {
+  const makeRequest = async (retries = 1) => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for CPU
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
     
     try {
       const response = await fetch(url, {
@@ -103,15 +94,13 @@ const callBackend = async (baseUrl: string, endpoint: string, payload: any, onSt
       });
       clearTimeout(timeoutId);
 
-      if (!response.ok && (response.status === 503 || response.status === 504) && retries > 0) {
-        if (onStatus) onStatus(`💤 Backend waking up... (${retries} retries left)`);
-        await new Promise(r => setTimeout(r, 5000));
-        return makeRequest(retries - 1);
-      }
-
       if (!response.ok) {
-         const err = await response.text().catch(() => "Unknown");
-         throw new Error(`API Error ${response.status}: ${err.substring(0, 50)}`);
+         if ((response.status === 503 || response.status === 504) && retries > 0) {
+            if (onStatus) onStatus(`💤 Waking up node... (${retries})`);
+            await new Promise(r => setTimeout(r, 5000));
+            return makeRequest(retries - 1);
+         }
+         throw new Error(`Backend Error ${response.status}`);
       }
 
       const data = await response.json();
@@ -119,15 +108,14 @@ const callBackend = async (baseUrl: string, endpoint: string, payload: any, onSt
       if (typeof data === 'string') return data;
       if (data.text) return data.text;
       if (data.response) return data.response;
-      if (data.generated_text) return data.generated_text;
+      // Note: Backend does not support TTS, so we don't check for audio here.
       
       return JSON.stringify(data);
 
     } catch (error: any) {
       clearTimeout(timeoutId);
-      if (retries > 0 && (error.name === 'AbortError' || error.message.includes('Failed'))) {
-         if (onStatus) onStatus("📡 Connection unstable, retrying...");
-         await new Promise(r => setTimeout(r, 5000));
+      if (retries > 0) {
+         await new Promise(r => setTimeout(r, 3000));
          return makeRequest(retries - 1);
       }
       throw error;
@@ -137,51 +125,49 @@ const callBackend = async (baseUrl: string, endpoint: string, payload: any, onSt
   try { return await makeRequest(); } catch (error) { throw error; }
 };
 
-const parseRiskResponse = (text: string, calculatedScore: number): RiskAnalysisResult => {
-  try {
-    let jsonStr = text;
-    const codeBlockMatch = text.match(/```json\s*(\{[\s\S]*?\})\s*```/);
-    if (codeBlockMatch) jsonStr = codeBlockMatch[1];
-    else {
-      const braceMatch = text.match(/\{[\s\S]*\}/);
-      if (braceMatch) jsonStr = braceMatch[0];
+// --- PIPELINE MANAGER ---
+// Execute: Primary -> Secondary -> Specific Backend
+async function executePipeline<T>(
+    geminiTask: (model: string) => Promise<T>,
+    fallbackTask: () => Promise<T>,
+    onStatus?: (msg: string) => void
+): Promise<T> {
+    
+    if (!API_KEY) {
+        return await fallbackTask();
     }
-    const data = JSON.parse(jsonStr);
-    const pipeline = [
-      { code: data.primaryConditionCode?.code || "N/A", description: data.primaryConditionCode?.description || "Unknown", type: 'Primary' },
-      ...(data.historyCodes || []).map((h: any) => ({ code: h.code, description: h.description, type: 'History' }))
-    ];
-    return {
-      numericScore: calculatedScore,
-      summary: cleanText(data.summary || "Analysis completed."),
-      actionItems: (data.actionItems || []).map(cleanText),
-      icd10Codes: [], 
-      codingPipeline: pipeline as any,
-      insuranceNote: cleanText(data.insuranceNote || "Review required."),
-      timestamp: new Date().toISOString()
-    };
-  } catch (e) {
-    return {
-        numericScore: calculatedScore,
-        summary: cleanText(text).substring(0, 500) || "Analysis currently unavailable.",
-        actionItems: ["Review inputs", "Consult provider"],
-        icd10Codes: [],
-        codingPipeline: [],
-        insuranceNote: "Automated analysis fallback.",
-        timestamp: new Date().toISOString()
+
+    try {
+        // 1. Primary Model
+        if (onStatus) onStatus("⚡ Using Gemini 2.5 Flash...");
+        return await geminiTask(MODEL_PRIMARY);
+    } catch (error: any) {
+        // Check for Quota/Rate Limits or Model Overload
+        if (error.toString().includes('429') || error.toString().includes('Quota') || error.toString().includes('503')) {
+            try {
+                // 2. Secondary Model
+                if (onStatus) onStatus("⚠️ Quota limit. Switching to 2.5 Flash Lite...");
+                return await geminiTask(MODEL_SECONDARY);
+            } catch (secondaryError) {
+                console.warn("Secondary model failed:", secondaryError);
+            }
+        }
+        
+        // 3. Backend Fallback
+        if (onStatus) onStatus("🐢 Fallback to Custom Backend...");
+        return await fallbackTask();
     }
-  }
-};
+}
 
 // --- VISION EXTRACTION ---
 export const extractClinicalData = async (imageBase64: string, onStatus?: (msg: string) => void): Promise<ExtractionResult> => {
   const base64Data = imageBase64.includes('base64,') ? imageBase64.split('base64,')[1] : imageBase64;
   const prompt = `Analyze this medical document. CRITICAL: Look for Patient Name. Extract JSON: { name, age, condition, history, allergies, systolicBp, glucose, heartRate, weight, temperature, spo2, clinicalNote }. Return JSON only.`;
   
-  const callGeminiVision = async (modelName: string) => {
-    if (onStatus) onStatus(`⚡ Scanning with ${modelName}...`);
+  // Gemini Task
+  const geminiTask = async (model: string): Promise<ExtractionResult> => {
     const response = await ai.models.generateContent({
-      model: modelName,
+      model: model,
       contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }] }],
       config: { responseMimeType: "application/json", maxOutputTokens: 2000 }
     });
@@ -194,39 +180,24 @@ export const extractClinicalData = async (imageBase64: string, onStatus?: (msg: 
     };
   };
 
-  try {
-    if (!API_KEY) throw new Error("API Key missing");
-    return await callGeminiVision(MODEL_TIER_1);
-  } catch (e: any) { 
-    if (e.toString().includes('429') || e.toString().includes('Quota')) {
-        try {
-            return await callGeminiVision(MODEL_TIER_2);
-        } catch (e2) {}
-    }
+  // Fallback Task (somAI-media / Moondream)
+  const fallbackTask = async (): Promise<ExtractionResult> => {
+    const compressedBase64 = await compressImage(imageBase64);
+    const cleanBase64 = compressedBase64.includes('base64,') ? compressedBase64.split('base64,')[1] : compressedBase64;
+    const resText = await callBackend(MEDIA_BACKEND_BASE, '/vision', { image: cleanBase64, prompt: "Extract patient name and numeric vitals from this image." }, onStatus);
+    return {
+        profile: {}, 
+        vitals: { clinicalNote: `[Auto-Scanned by Moondream]: ${resText}` },
+        confidence: 0.6
+    };
+  };
 
-    // Fallback: Moondream on Media Backend
-    try {
-        if (onStatus) onStatus("🐢 Compressing for Moondream...");
-        const compressedBase64 = await compressImage(imageBase64);
-        const cleanBase64 = compressedBase64.includes('base64,') ? compressedBase64.split('base64,')[1] : compressedBase64;
-        
-        if (onStatus) onStatus("🐢 Using Local Vision Node...");
-        const resText = await callBackend(MEDIA_API_BASE, '/vision', { image: cleanBase64, prompt: "Extract patient name and vitals from this document." }, onStatus);
-        
-        return {
-            profile: {}, 
-            vitals: { clinicalNote: `[Auto-Scanned]: ${resText}` },
-            confidence: 0.6
-        }
-    } catch (fallbackError) {
-        throw new Error("Scan failed. Please type details manually."); 
-    }
-  }
+  return executePipeline<ExtractionResult>(geminiTask, fallbackTask, onStatus);
 };
 
+// --- TTS (Voice) ---
 export const generateSpeech = async (text: string): Promise<string | null> => {
-  if (!API_KEY) return null;
-  try {
+  const geminiTask = async () => {
     const response = await ai.models.generateContent({
       model: MODEL_TTS,
       contents: [{ parts: [{ text }] }],
@@ -236,27 +207,56 @@ export const generateSpeech = async (text: string): Promise<string | null> => {
       },
     });
     return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
-  } catch (e) {
-    return null;
+  };
+
+  // Fallback: Return NULL. 
+  // The Frontend (Chat.tsx) will detect NULL and use `window.speechSynthesis` (Browser Native TTS).
+  // The backend does not have a /tts endpoint.
+  const fallbackTask = async () => {
+    return null; 
+  };
+
+  // We manually handle pipeline here to ensure fallback returns null instead of throwing
+  if (API_KEY) {
+      try {
+          return await geminiTask();
+      } catch (e) {
+          // Fallthrough
+      }
   }
+  return await fallbackTask();
 };
 
+// --- STT (Transcription) ---
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
     const reader = new FileReader();
-    return new Promise((resolve, reject) => {
-        reader.onloadend = async () => {
-            const base64 = (reader.result as string).split(',')[1];
-            try {
-                // Whisper calls go to Media Backend
-                const text = await callBackend(MEDIA_API_BASE, '/transcribe', { audio: base64 });
-                resolve(text);
-            } catch (e) { reject("Voice transcription failed."); }
-        };
+    
+    // Convert Blob to Base64 for processing
+    const getBase64 = (): Promise<string> => new Promise((resolve) => {
+        reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
         reader.readAsDataURL(audioBlob);
     });
+    const base64Audio = await getBase64();
+
+    const geminiTask = async (model: string) => {
+        const response = await ai.models.generateContent({
+            model: model,
+            contents: [{ 
+                role: 'user', 
+                parts: [{ text: "Transcribe this audio exactly." }, { inlineData: { mimeType: 'audio/wav', data: base64Audio } }] 
+            }],
+        });
+        return response.text || "";
+    };
+
+    const fallbackTask = async () => {
+        return await callBackend(MEDIA_BACKEND_BASE, '/transcribe', { audio: base64Audio });
+    };
+
+    return executePipeline(geminiTask, fallbackTask);
 };
 
-// --- RISK ANALYSIS ---
+// --- RISK ANALYSIS (Text) ---
 export const analyzeRisk = async (
   profile: PatientProfile, 
   vitals: ClinicalVitals, 
@@ -273,10 +273,9 @@ export const analyzeRisk = async (
     Return JSON.
   `;
 
-  const callGeminiRisk = async (modelName: string) => {
-    if (onStatus) onStatus(`⚡ Analyzing with ${modelName}...`);
+  const geminiTask = async (model: string) => {
     const response = await ai.models.generateContent({
-        model: modelName,
+        model: model,
         contents: prompt,
         config: {
             responseMimeType: "application/json",
@@ -294,66 +293,22 @@ export const analyzeRisk = async (
             }
         }
     });
-    return { ...parseRiskResponse(response.text || "{}", calculatedScore), source: modelName === MODEL_TIER_1 ? 'Gemini 2.5 Flash-Lite' : 'Gemini 2.5 Flash' };
+    
+    const parsed = parseRiskResponse(response.text || "{}", calculatedScore);
+    return { ...parsed, source: model === MODEL_PRIMARY ? 'Gemini 2.5 Flash' : 'Gemini 2.5 Flash Lite' };
   };
 
-  try {
-    if (!API_KEY) throw new Error("API Key missing");
-    return await callGeminiRisk(MODEL_TIER_1);
-  } catch (err: any) {
-    if (err.toString().includes('429') || err.toString().includes('Quota')) {
-        try { return await callGeminiRisk(MODEL_TIER_2); } catch (e2) {}
-    }
+  const fallbackTask = async () => {
+    const payload = { ...profile, ...vitals, riskScore: calculatedScore, prompt };
+    const text = await callBackend(TEXT_BACKEND_BASE, '/analyze', payload, onStatus);
+    const parsed = parseRiskResponse(text, calculatedScore);
+    return { ...parsed, source: 'Phi-3 Mini (SomAI Text Node)' };
+  };
 
-    try {
-      const payload = { ...profile, ...vitals, riskScore: calculatedScore, prompt };
-      // Fallback goes to Primary Backend (Text Node)
-      const fallback = await callBackend(PRIMARY_API_BASE, '/analyze', payload, onStatus);
-      return { 
-        ...parseRiskResponse(fallback, calculatedScore),
-        source: 'Phi-3 Mini (Fallback)' 
-      };
-    } catch {
-      throw new Error("Analysis failed");
-    }
-  }
+  return executePipeline(geminiTask, fallbackTask, onStatus);
 };
 
-export const generateHealthInsights = async (profile: PatientProfile, vitals: ClinicalVitals): Promise<HealthInsights> => {
-  const prompt = `Based on Patient: ${profile.name}, ${profile.age}y, ${profile.condition}. Vitals: BP ${vitals.systolicBp}. Generate JSON: { weeklySummary, progress, tips: [] }.`;
-  
-  const callGeminiInsights = async (model: string) => {
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: prompt,
-      config: { responseMimeType: "application/json", maxOutputTokens: 2000 }
-    });
-    return JSON.parse(response.text || "{}");
-  }
-
-  try {
-    if (!API_KEY) throw new Error("No Key");
-    return await callGeminiInsights(MODEL_TIER_1);
-  } catch (err: any) {
-    if (err.toString().includes('429')) {
-        try { return await callGeminiInsights(MODEL_TIER_2); } catch (e) {}
-    }
-    return { weeklySummary: "Keep tracking your vitals.", progress: "Data accumulated.", tips: ["Maintain a balanced diet.", "Stay hydrated."] };
-  }
-};
-
-export const generateSessionName = async (userText: string, aiText: string): Promise<string> => {
-  const prompt = `Generate a very short, specific title (max 4 words) for a medical chat session based on this context. User: ${userText}. AI: ${aiText}. Title:`;
-  try {
-    if (!API_KEY) return "New Consultation";
-    const response = await ai.models.generateContent({ model: MODEL_TIER_1, contents: prompt, config: { maxOutputTokens: 20 } });
-    return cleanText(response.text || "New Consultation").replace(/^["']|["']$/g, '');
-  } catch (e) {
-    return "New Consultation";
-  }
-};
-
-// --- CHAT ---
+// --- CHAT (Text) ---
 export const generateChatResponse = async (
   history: ChatMessage[], 
   currentMessage: string, 
@@ -373,54 +328,127 @@ export const generateChatResponse = async (
   const contents = history.map(msg => ({ role: msg.role === 'user' ? 'user' : 'model', parts: [{ text: msg.text }, ...(msg.image ? [{ inlineData: { mimeType: 'image/jpeg', data: msg.image.split('base64,')[1] } }] : [])] }));
   contents.push({ role: 'user', parts: [{ text: context + "\nUser: " + currentMessage }, ...(image ? [{ inlineData: { mimeType: 'image/jpeg', data: image.split('base64,')[1] } }] : [])] });
 
-  const callGeminiChat = async (modelName: string) => {
-    if (onStatus) onStatus(`Generating with ${modelName}...`);
-    onSource(modelName === MODEL_TIER_1 ? 'Gemini 2.5 Flash-Lite' : 'Gemini 2.5 Flash'); 
+  const geminiTask = async (model: string) => {
+    onSource(model === MODEL_PRIMARY ? 'Gemini 2.5 Flash' : 'Gemini 2.5 Flash Lite'); 
     const response = await ai.models.generateContent({
-        model: modelName,
+        model: model,
         contents: contents,
         config: { maxOutputTokens: 4000, temperature: 0.7 }
     });
     return cleanText(response.text || "I didn't catch that.");
   };
 
-  try {
-    if (!API_KEY) throw new Error("No Key");
-    return await callGeminiChat(MODEL_TIER_1);
-  } catch (e: any) {
-    if (e.toString().includes('429') || e.toString().includes('Quota')) {
-        try {
-            return await callGeminiChat(MODEL_TIER_2);
-        } catch (e2) {}
-    }
+  const fallbackTask = async () => {
+    onSource('Phi-3 Mini (SomAI Text Node)'); 
+    const fallbackPrompt = `${context}\n\nChat History:\n${history.slice(-3).map(m => m.text).join('\n')}\nUser: ${currentMessage}`;
+    return await callBackend(TEXT_BACKEND_BASE, '/generate', { prompt: fallbackPrompt }, onStatus);
+  };
 
+  return executePipeline(geminiTask, fallbackTask, onStatus);
+};
+
+// --- HELPERS ---
+
+const parseRiskResponse = (text: string, calculatedScore: number): RiskAnalysisResult => {
     try {
-      if (onStatus) onStatus("Falling back to Local Phi-3...");
-      onSource('Phi-3 Mini (Fallback)'); 
-      const fallbackPrompt = `${context}\n\nChat History:\n${history.slice(-3).map(m => m.text).join('\n')}\nUser: ${currentMessage}`;
-      // Fallback goes to Primary Backend (Text Node)
-      const responseText = await callBackend(PRIMARY_API_BASE, '/generate', { prompt: fallbackPrompt }, onStatus);
-      return cleanText(responseText);
-    } catch { 
-        return "I'm having trouble connecting. Please check your internet.";
+      let jsonStr = text;
+      // Clean markdown code blocks if any
+      jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '');
+      const data = JSON.parse(jsonStr);
+      
+      const pipeline = [
+        { code: data.primaryConditionCode?.code || "N/A", description: data.primaryConditionCode?.description || "Unknown", type: 'Primary' },
+        ...(data.historyCodes || []).map((h: any) => ({ code: h.code, description: h.description, type: 'History' }))
+      ];
+      return {
+        numericScore: calculatedScore,
+        summary: cleanText(data.summary || "Analysis completed."),
+        actionItems: (data.actionItems || []).map(cleanText),
+        icd10Codes: [], 
+        codingPipeline: pipeline as any,
+        insuranceNote: cleanText(data.insuranceNote || "Review required."),
+        timestamp: new Date().toISOString()
+      };
+    } catch (e) {
+      return {
+          numericScore: calculatedScore,
+          summary: cleanText(text).substring(0, 500) || "Analysis currently unavailable.",
+          actionItems: ["Review inputs", "Consult provider"],
+          icd10Codes: [],
+          codingPipeline: [],
+          insuranceNote: "Automated analysis fallback.",
+          timestamp: new Date().toISOString()
+      }
     }
+  };
+
+export const generateHealthInsights = async (profile: PatientProfile, vitals: ClinicalVitals): Promise<HealthInsights> => {
+  const prompt = `Based on Patient: ${profile.name}, ${profile.age}y, ${profile.condition}. Vitals: BP ${vitals.systolicBp}. Generate JSON: { weeklySummary, progress, tips: [] }.`;
+  
+  const geminiTask = async (model: string) => {
+    const response = await ai.models.generateContent({
+      model: model,
+      contents: prompt,
+      config: { responseMimeType: "application/json", maxOutputTokens: 2000 }
+    });
+    return JSON.parse(response.text || "{}");
   }
+  
+  const fallbackTask = async () => {
+      return { weeklySummary: "Keep tracking your vitals regularly.", progress: "Data accumulated.", tips: ["Maintain a balanced diet.", "Stay hydrated."] };
+  }
+
+  return executePipeline(geminiTask, fallbackTask);
+};
+
+export const generateSessionName = async (userText: string, aiText: string): Promise<string> => {
+  const prompt = `Generate a very short, specific title (max 4 words) for a medical chat session based on this context. User: ${userText}. AI: ${aiText}. Title:`;
+  const geminiTask = async (model: string) => {
+      const response = await ai.models.generateContent({ model: model, contents: prompt, config: { maxOutputTokens: 20 } });
+      return cleanText(response.text || "New Consultation").replace(/^["']|["']$/g, '');
+  };
+  const fallbackTask = async () => "New Consultation";
+  return executePipeline(geminiTask, fallbackTask);
 };
 
 export const generateQuickReplies = async (history: ChatMessage[]) => {
   if (!API_KEY || history.length === 0) return [];
   const recentContext = history.slice(-3).map(m => `${m.role}: ${m.text}`).join('\n');
   const prompt = `Based on: ${recentContext}. Suggest 3 short follow-up questions. JSON array.`;
-  try {
-    const res = await ai.models.generateContent({ model: MODEL_TIER_1, contents: prompt, config: { responseMimeType: "application/json" } });
-    return JSON.parse(res.text || "[]");
-  } catch { return []; }
+  const geminiTask = async (model: string) => {
+      const res = await ai.models.generateContent({ model: model, contents: prompt, config: { responseMimeType: "application/json" } });
+      return JSON.parse(res.text || "[]");
+  };
+  const fallbackTask = async () => [];
+  return executePipeline(geminiTask, fallbackTask);
 };
 
 export const summarizeConversation = async (history: ChatMessage[]) => {
-  if (!API_KEY) return "Summary unavailable.";
-  try {
-    const res = await ai.models.generateContent({ model: MODEL_TIER_1, contents: `Summarize:\n${history.map(m=>m.text).join('\n')}` });
-    return cleanText(res.text || "");
-  } catch { return "Could not summarize."; }
+  const textContent = history.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n');
+  
+  // DIRECT PROMPT for speed and structure
+  const prompt = `
+    Summarize this medical consultation into a structured "Consultation Brief".
+    Key Sections: 
+    - Topic
+    - Key Symptoms/Definitions
+    - Action Plan / Treatment
+    - Urgency
+    Keep it professional, clear, and educational. Format as plain text with bullet points.
+    
+    TRANSCRIPT:
+    ${textContent.substring(0, 15000)}
+  `;
+
+  const geminiTask = async (model: string) => {
+      const res = await ai.models.generateContent({ model: model, contents: prompt, config: { maxOutputTokens: 2000 } });
+      return cleanText(res.text || "");
+  };
+
+  const fallbackTask = async () => {
+      // Very basic fallback
+      return "Consultation completed. Please review chat history for details.";
+  };
+
+  return executePipeline(geminiTask, fallbackTask);
 };

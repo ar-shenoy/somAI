@@ -1,6 +1,6 @@
 import React from 'react';
 import { PatientProfile, ClinicalVitals, RiskAnalysisResult, ChatMessage, Medication } from '../types';
-import { FileText, User, Activity, Pill, MessageSquare, ShieldCheck, Zap, Server } from 'lucide-react';
+import { FileText, User, Activity, Pill, MessageSquare, ShieldCheck, Zap, Server, Clipboard } from 'lucide-react';
 
 interface ReportViewProps {
   profile: PatientProfile;
@@ -26,23 +26,42 @@ const ReportView: React.FC<ReportViewProps> = ({
         </h2>
 
         <div className="glass-panel p-6 rounded-2xl space-y-8">
-            {/* Demographics */}
+            {/* 1. Demographics (Compact) */}
             <section>
                 <h3 className="text-sm font-mono font-bold text-gray-400 uppercase mb-4 border-b border-white/5 pb-2 flex items-center gap-2">
                     <User size={16} /> Patient Demographics
                 </h3>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                    <div><span className="text-gray-500 block text-xs uppercase tracking-wide">Name</span><span className="text-white">{profile.name}</span></div>
-                    <div><span className="text-gray-500 block text-xs uppercase tracking-wide">Age</span><span className="text-white">{profile.age}</span></div>
-                    <div className="col-span-2"><span className="text-gray-500 block text-xs uppercase tracking-wide">Condition</span><span className="text-white">{profile.condition}</span></div>
-                    <div className="col-span-4"><span className="text-gray-500 block text-xs uppercase tracking-wide">Medical History</span><span className="text-white">{profile.history || 'N/A'}</span></div>
+                    <div className="bg-black/20 p-3 rounded-lg border border-white/5"><span className="text-gray-500 block text-xs uppercase tracking-wide">Name</span><span className="text-white font-bold">{profile.name}</span></div>
+                    <div className="bg-black/20 p-3 rounded-lg border border-white/5"><span className="text-gray-500 block text-xs uppercase tracking-wide">Age</span><span className="text-white font-bold">{profile.age}</span></div>
+                    <div className="bg-black/20 p-3 rounded-lg border border-white/5"><span className="text-gray-500 block text-xs uppercase tracking-wide">Gender</span><span className="text-white font-bold">{profile.gender}</span></div>
+                    <div className="bg-black/20 p-3 rounded-lg border border-white/5"><span className="text-gray-500 block text-xs uppercase tracking-wide">Blood Group</span><span className="text-white font-bold">{profile.bloodGroup}</span></div>
                 </div>
             </section>
 
-            {/* Vitals & Risk */}
+            {/* 2. Condition & History (Full Width - Moved here per request) */}
+            <section className="bg-white/5 p-4 rounded-xl border border-white/5">
+                <h3 className="text-sm font-mono font-bold text-gray-400 uppercase mb-3 flex items-center gap-2">
+                    <Clipboard size={16} /> Clinical Background
+                </h3>
+                <div className="space-y-4">
+                    <div>
+                        <span className="text-xs text-neon-blue font-bold uppercase tracking-wide block mb-1">Primary Condition</span>
+                        <p className="text-white text-sm bg-black/20 p-3 rounded-lg border border-white/5">{profile.condition}</p>
+                    </div>
+                    <div>
+                        <span className="text-xs text-gray-500 font-bold uppercase tracking-wide block mb-1">Detailed History</span>
+                        <p className="text-gray-300 text-sm bg-black/20 p-3 rounded-lg border border-white/5 leading-relaxed">
+                            {profile.history || 'No detailed history recorded.'}
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            {/* 3. Vitals & Risk */}
             <section>
                 <h3 className="text-sm font-mono font-bold text-gray-400 uppercase mb-4 border-b border-white/5 pb-2 flex items-center gap-2 justify-between">
-                    <div className="flex items-center gap-2"><Activity size={16} /> Clinical Analysis</div>
+                    <div className="flex items-center gap-2"><Activity size={16} /> Vitals & Risk Analysis</div>
                     {riskResult?.source && (
                         <span className="text-[10px] font-mono font-medium text-gray-500 flex items-center gap-1 bg-white/5 px-2 py-0.5 rounded">
                             {riskResult.source.includes('Gemini') ? <Zap size={10}/> : <Server size={10}/>}

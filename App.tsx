@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Settings, X, Trash2, MessageSquare, FileText } from 'lucide-react';
+import { Settings, X, Trash2, MessageSquare, FileText, Download } from 'lucide-react';
 import { 
   PatientProfile, 
   ClinicalVitals, 
@@ -102,7 +102,7 @@ const App: React.FC = () => {
   useEffect(() => localStorage.setItem('somai_medications', JSON.stringify(medications)), [medications]);
   useEffect(() => localStorage.setItem('somai_chat_sessions', JSON.stringify(sessions)), [sessions]);
 
-  // Derived BP Sync - FIXED (Number Casting)
+  // Derived BP Sync
   useEffect(() => {
     const m = Number(vitals.systolicBpMorning) || 0;
     const e = Number(vitals.systolicBpEvening) || 0;
@@ -148,7 +148,6 @@ const App: React.FC = () => {
 
   const calculateRiskScore = (): number => {
     let score = 10;
-    // Force Number type for all inputs
     const bpM = Number(vitals.systolicBpMorning) || 0;
     const bpE = Number(vitals.systolicBpEvening) || 0;
     const maxBp = Math.max(bpM, bpE);
@@ -179,7 +178,6 @@ const App: React.FC = () => {
     try {
       const score = calculateRiskScore();
       const [rResult, iResult] = await Promise.all([
-        // Pass setStatusMessage so UI shows "Trying Gemini..." vs "Using Phi-3..."
         analyzeRisk(profile, vitals, score, setStatusMessage),
         generateHealthInsights(profile, vitals)
       ]);
@@ -219,7 +217,7 @@ const App: React.FC = () => {
         profile, 
         mode,
         (source) => { activeSource = source; },
-        setStatusMessage // Pass status setter
+        setStatusMessage
       );
 
       const aiMsg: ChatMessage = { 
@@ -261,6 +259,19 @@ const App: React.FC = () => {
   const handlePrintReport = () => window.print();
   const handleResetData = () => { if(confirm('Reset all data?')) { localStorage.clear(); window.location.reload(); } };
 
+  const handleExportData = () => {
+     const data = { profile, medications, sessions, vitals, riskResult };
+     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+     const url = URL.createObjectURL(blob);
+     const a = document.createElement('a');
+     a.href = url;
+     a.download = `somai_backup_${new Date().toISOString().split('T')[0]}.json`;
+     document.body.appendChild(a);
+     a.click();
+     document.body.removeChild(a);
+     URL.revokeObjectURL(url);
+  };
+
   const printableRoot = document.getElementById('printable-root');
 
   return (
@@ -283,7 +294,6 @@ const App: React.FC = () => {
           ))}
         </div>
 
-        {/* Content fills remaining vertical space */}
         <div className="flex-1 min-h-0 flex flex-col">
           {activeTab === 'dashboard' && (
             <Dashboard 
@@ -333,6 +343,7 @@ const App: React.FC = () => {
             <button onClick={() => setShowSettings(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
             <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2"><Settings className="text-neon-green" size={20} /> Settings</h2>
             <div className="space-y-4">
+               <button onClick={handleExportData} className="w-full p-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 flex items-center gap-3 text-left transition-all"><div className="p-2 bg-blue-500/10 rounded-lg text-blue-400"><Download size={18} /></div><div><h3 className="font-bold text-sm text-gray-200">Backup Data</h3><p className="text-xs text-gray-500">Export profile to JSON</p></div></button>
                <button onClick={handlePrintReport} className="w-full p-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 flex items-center gap-3 text-left transition-all"><div className="p-2 bg-green-500/10 rounded-lg text-green-400"><FileText size={18} /></div><div><h3 className="font-bold text-sm text-gray-200">Download PDF Report</h3><p className="text-xs text-gray-500">Save full analysis & chat history</p></div></button>
                <button onClick={handleResetData} className="w-full p-4 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/10 flex items-center gap-3 text-left transition-all"><div className="p-2 bg-red-500/10 rounded-lg text-red-400"><Trash2 size={18} /></div><div><h3 className="font-bold text-sm text-red-200">Reset Application</h3><p className="text-xs text-red-400/60">Delete all local data & profile</p></div></button>
             </div>

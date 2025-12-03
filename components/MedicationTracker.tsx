@@ -1,6 +1,5 @@
-
 import React, { useState, useCallback } from 'react';
-import { Plus, Trash2, CheckCircle, Trophy, AlertTriangle, Quote, Calendar, Edit2, X, Save } from 'lucide-react';
+import { Plus, Trash2, CheckCircle, Trophy, AlertTriangle, Quote, Calendar, Edit2, X, Save, Clock } from 'lucide-react';
 import { Medication, PatientProfile } from '../types';
 
 interface MedicationTrackerProps {
@@ -17,57 +16,88 @@ const MOTIVATIONAL_QUOTES = [
   "It does not matter how slowly you go as long as you do not stop. – Confucius"
 ];
 
-// Memoized item to prevent lag when typing in form
+// Helper to get local date string YYYY-MM-DD
+const getLocalTodayString = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
+// Check if med is active today
+const isDueToday = (med: Medication) => {
+    const today = getLocalTodayString();
+    // If start date exists and is in the future, it's not due
+    if (med.startDate && med.startDate > today) return false;
+    // If end date exists and is in the past, it's not due
+    if (med.endDate && med.endDate < today) return false;
+    return true;
+};
+
+// Memoized item
 const MedicationItem = React.memo(({ med, editingId, onToggle, onEdit, onDelete }: { 
   med: Medication; 
   editingId: string | null; 
   onToggle: (id: string) => void;
   onEdit: (med: Medication) => void;
   onDelete: (id: string) => void;
-}) => (
-  <div className={`glass-card p-4 rounded-xl flex justify-between items-center group transition-all relative ${editingId === med.id ? 'border-neon-yellow/50 bg-neon-yellow/5' : (med.taken ? 'border-green-500/30 bg-green-500/5' : 'border-white/5')}`}>
-    <div className="flex items-center gap-4">
-        <button 
-          onClick={() => onToggle(med.id)}
-          className={`w-8 h-8 rounded-full flex items-center justify-center border transition-all ${
-            med.taken 
-            ? 'bg-green-500 border-green-500 text-black' 
-            : 'border-gray-500 text-transparent hover:border-green-400'
-          }`}
-        >
-          <CheckCircle size={16} />
-        </button>
-        <div>
-          <p className={`font-bold ${med.taken ? 'text-green-400 line-through' : 'text-white'}`}>{med.name}</p>
-          <div className="flex flex-col gap-0.5 mt-1">
-            <span className="text-xs text-gray-400">{med.dosage} • {med.time}</span>
-            {(med.startDate || med.endDate) && (
-              <span className="text-[10px] text-gray-500 flex items-center gap-1">
-                  <Calendar size={10} /> {med.startDate || 'Now'} → {med.endDate || 'Ongoing'}
-              </span>
-            )}
+}) => {
+  const isDue = isDueToday(med);
+  
+  return (
+    <div className={`glass-card p-4 rounded-xl flex justify-between items-center group transition-all relative 
+      ${editingId === med.id ? 'border-neon-yellow/50 bg-neon-yellow/5' : 
+        (med.taken ? 'border-green-500/30 bg-green-500/5' : 
+        (!isDue ? 'border-white/5 opacity-50 grayscale' : 'border-white/5'))}`}>
+      
+      <div className="flex items-center gap-4">
+          <button 
+            onClick={() => onToggle(med.id)}
+            disabled={!isDue}
+            className={`w-8 h-8 rounded-full flex items-center justify-center border transition-all ${
+              med.taken 
+              ? 'bg-green-500 border-green-500 text-black' 
+              : (!isDue ? 'border-gray-700 text-gray-700 cursor-not-allowed' : 'border-gray-500 text-transparent hover:border-green-400')
+            }`}
+          >
+            {med.taken ? <CheckCircle size={16} /> : !isDue ? <Clock size={14}/> : null}
+          </button>
+          <div>
+            <p className={`font-bold ${med.taken ? 'text-green-400 line-through' : 'text-white'}`}>
+                {med.name} 
+                {!isDue && <span className="text-[10px] ml-2 font-normal text-gray-500 bg-white/5 px-1.5 py-0.5 rounded border border-white/5">NOT DUE TODAY</span>}
+            </p>
+            <div className="flex flex-col gap-0.5 mt-1">
+              <span className="text-xs text-gray-400">{med.dosage} • {med.time}</span>
+              {(med.startDate || med.endDate) && (
+                <span className="text-[10px] text-gray-500 flex items-center gap-1">
+                    <Calendar size={10} /> {med.startDate || 'Now'} → {med.endDate || 'Ongoing'}
+                </span>
+              )}
+            </div>
           </div>
-        </div>
+      </div>
+      
+      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button 
+            onClick={() => onEdit(med)}
+            className="p-2 rounded-lg text-gray-400 hover:text-neon-yellow hover:bg-neon-yellow/10 transition-colors"
+            title="Edit"
+          >
+              <Edit2 size={16} />
+          </button>
+          <button 
+            onClick={() => onDelete(med.id)} 
+            className="p-2 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-400/10 transition-colors"
+            title="Delete"
+          >
+              <Trash2 size={16} />
+          </button>
+      </div>
     </div>
-    
-    <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button 
-          onClick={() => onEdit(med)}
-          className="p-2 rounded-lg text-gray-400 hover:text-neon-yellow hover:bg-neon-yellow/10 transition-colors"
-          title="Edit"
-        >
-            <Edit2 size={16} />
-        </button>
-        <button 
-          onClick={() => onDelete(med.id)} 
-          className="p-2 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-400/10 transition-colors"
-          title="Delete"
-        >
-            <Trash2 size={16} />
-        </button>
-    </div>
-  </div>
-));
+  );
+});
 
 const MedicationTracker: React.FC<MedicationTrackerProps> = ({ 
   medications, 
@@ -150,35 +180,35 @@ const MedicationTracker: React.FC<MedicationTrackerProps> = ({
       return m;
     });
 
-    // 2. Determine Streak Changes
-    const allTakenNow = updatedMeds.length > 0 && updatedMeds.every(m => m.taken);
+    // 2. Determine Streak Changes (LOGIC FIX: Filter ONLY meds active TODAY)
+    const todayMeds = updatedMeds.filter(isDueToday);
+    
+    // Only check if active meds are taken. If no meds due today, streak logic is neutral (or paused).
+    const allActiveTaken = todayMeds.length > 0 && todayMeds.every(m => m.taken);
     
     const today = new Date();
     today.setHours(0,0,0,0);
-    const todayStr = today.toISOString();
     
     const lastUpdate = new Date(profile.lastStreakUpdate);
     lastUpdate.setHours(0,0,0,0);
-    const lastUpdateStr = lastUpdate.toISOString();
 
     const isToday = today.getTime() === lastUpdate.getTime();
 
     let newStreak = profile.streak;
     let newLastUpdate = profile.lastStreakUpdate;
 
-    if (allTakenNow) {
+    if (allActiveTaken) {
       if (!isToday) {
         // First time finishing today -> Increment
         newStreak += 1;
-        newLastUpdate = new Date().toISOString(); // store full timestamp for exactness
+        newLastUpdate = new Date().toISOString(); 
       }
     } else {
       // Not all taken
       if (isToday) {
-        // If we previously marked today as done, we need to revert it.
-        // Decrement streak (min 0)
+        // previously marked done today, now unchecked -> Revert
         newStreak = Math.max(0, newStreak - 1);
-        // Set update date to yesterday so if they re-complete it, it counts as "new" for today
+        // Reset date to yesterday to allow re-completion
         const yesterday = new Date(today);
         yesterday.setDate(yesterday.getDate() - 1);
         newLastUpdate = yesterday.toISOString();
@@ -196,7 +226,8 @@ const MedicationTracker: React.FC<MedicationTrackerProps> = ({
     }
   }, [medications, profile.streak, profile.lastStreakUpdate, setMedications, setProfile]);
 
-  const pendingMeds = medications.filter(m => !m.taken).length;
+  // LOGIC FIX: Pending count only looks at what is due today
+  const pendingMeds = medications.filter(m => isDueToday(m) && !m.taken).length;
   const randomQuote = MOTIVATIONAL_QUOTES[Math.floor(Math.random() * MOTIVATIONAL_QUOTES.length)];
 
   return (
@@ -312,14 +343,24 @@ const MedicationTracker: React.FC<MedicationTrackerProps> = ({
             )}
          </div>
 
-         {pendingMeds > 0 && (
+         {pendingMeds > 0 ? (
            <div className="glass-card p-4 rounded-xl border-l-4 border-l-neon-red flex items-start gap-4">
               <div className="p-2 bg-neon-red/10 rounded-lg text-neon-red">
                  <AlertTriangle size={24} />
               </div>
               <div>
                  <h4 className="font-bold text-white">Missed Doses Pending</h4>
-                 <p className="text-sm text-gray-400 mt-1">You have <span className="text-neon-red font-bold">{pendingMeds}</span> medication(s) pending for today.</p>
+                 <p className="text-sm text-gray-400 mt-1">You have <span className="text-neon-red font-bold">{pendingMeds}</span> medication(s) due today.</p>
+              </div>
+           </div>
+         ) : (
+            <div className="glass-card p-4 rounded-xl border-l-4 border-l-green-500 flex items-start gap-4">
+              <div className="p-2 bg-green-500/10 rounded-lg text-green-500">
+                 <CheckCircle size={24} />
+              </div>
+              <div>
+                 <h4 className="font-bold text-white">All Caught Up!</h4>
+                 <p className="text-sm text-gray-400 mt-1">You've taken all your medications for today.</p>
               </div>
            </div>
          )}

@@ -69,6 +69,9 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
 
+  // --- GLOBAL STATUS MESSAGE (For Transparency) ---
+  const [statusMessage, setStatusMessage] = useState('');
+
   // --- EFFECTS ---
   useEffect(() => { wakeUpBackend(); }, []);
 
@@ -99,17 +102,21 @@ const App: React.FC = () => {
   useEffect(() => localStorage.setItem('somai_medications', JSON.stringify(medications)), [medications]);
   useEffect(() => localStorage.setItem('somai_chat_sessions', JSON.stringify(sessions)), [sessions]);
 
-  // Derived BP Sync
+  // Derived BP Sync - FIXED (Number Casting)
   useEffect(() => {
-    const avg = Math.round((vitals.systolicBpMorning + vitals.systolicBpEvening) / 2);
-    if (avg !== vitals.systolicBp) setVitals(v => ({ ...v, systolicBp: avg }));
+    const m = Number(vitals.systolicBpMorning) || 0;
+    const e = Number(vitals.systolicBpEvening) || 0;
+    const avg = (m > 0 && e > 0) ? Math.round((m + e) / 2) : Math.max(m, e);
+    
+    if (avg !== vitals.systolicBp) {
+        setVitals(v => ({ ...v, systolicBp: avg }));
+    }
   }, [vitals.systolicBpMorning, vitals.systolicBpEvening]);
 
   // --- LOGIC ---
   const activeSession = sessions.find(s => s.id === currentSessionId) || sessions[0];
   const chatHistory = activeSession?.messages || [];
 
-  // CRUD OPERATIONS FOR CHAT
   const createNewSession = () => {
     const newId = Date.now().toString();
     const newSession: ChatSession = {
@@ -141,24 +148,39 @@ const App: React.FC = () => {
 
   const calculateRiskScore = (): number => {
     let score = 10;
-    const maxBp = Math.max(vitals.systolicBpMorning, vitals.systolicBpEvening);
+    // Force Number type for all inputs
+    const bpM = Number(vitals.systolicBpMorning) || 0;
+    const bpE = Number(vitals.systolicBpEvening) || 0;
+    const maxBp = Math.max(bpM, bpE);
+    
+    const gluc = Number(vitals.glucose) || 0;
+    const spo2 = Number(vitals.spo2) || 98;
+    const hr = Number(vitals.heartRate) || 72;
+    const temp = Number(vitals.temperature) || 98.6;
+
     if (maxBp >= 180) score += 50; else if (maxBp >= 140) score += 25; else if (maxBp >= 130) score += 10;
-    if (vitals.glucose >= 250) score += 40; else if (vitals.glucose >= 180) score += 20; 
-    if (vitals.spo2 < 90) score += 30; else if (vitals.spo2 < 95) score += 15;
-    if (vitals.heartRate > 100 || vitals.heartRate < 50) score += 15;
-    if (vitals.temperature > 99.5) score += 20;
+    if (gluc >= 250) score += 40; else if (gluc >= 180) score += 20; 
+    
+    if (spo2 < 90) score += 30; else if (spo2 < 95) score += 15;
+
+    if (hr > 100 || hr < 50) score += 15;
+    if (temp > 99.5) score += 20;
     if (vitals.missedDoses > 0) score += (vitals.missedDoses * 5); 
+
     if (profile.smokingStatus === 'Current') score += 15;
     if (profile.exerciseFrequency === 'Sedentary') score += 10;
+
     return Math.min(Math.max(Math.round(score), 1), 100);
   };
 
   const handleRunAnalysis = async () => {
     setIsAnalyzing(true);
+    setStatusMessage("Analyzing Vitals...");
     try {
       const score = calculateRiskScore();
       const [rResult, iResult] = await Promise.all([
-        analyzeRisk(profile, vitals, score),
+        // Pass setStatusMessage so UI shows "Trying Gemini..." vs "Using Phi-3..."
+        analyzeRisk(profile, vitals, score, setStatusMessage),
         generateHealthInsights(profile, vitals)
       ]);
       setRiskResult(rResult);
@@ -168,6 +190,7 @@ const App: React.FC = () => {
       alert("Analysis failed. Please check connection.");
     } finally {
       setIsAnalyzing(false);
+      setStatusMessage('');
     }
   };
 
@@ -175,8 +198,6 @@ const App: React.FC = () => {
     if (!input.trim() && !image) return;
     
     const newUserMsg: ChatMessage = { id: Date.now().toString(), role: 'user', text: input, timestamp: Date.now(), image };
-    
-    // Optimistic Update
     const updatedMessages = [...chatHistory, newUserMsg];
     
     setSessions(prev => prev.map(s => 
@@ -186,6 +207,7 @@ const App: React.FC = () => {
     ));
 
     setIsProcessing(true);
+    setStatusMessage("Thinking...");
 
     try {
       let activeSource = '';
@@ -196,7 +218,8 @@ const App: React.FC = () => {
         image, 
         profile, 
         mode,
-        (source) => { activeSource = source; }
+        (source) => { activeSource = source; },
+        setStatusMessage // Pass status setter
       );
 
       const aiMsg: ChatMessage = { 
@@ -207,15 +230,12 @@ const App: React.FC = () => {
         modelUsed: activeSource
       };
 
-      // Update Session with AI Response
       setSessions(prev => prev.map(s => 
         s.id === currentSessionId 
         ? { ...s, messages: [...updatedMessages, aiMsg], lastModified: Date.now() } 
         : s
       ));
 
-      // AUTO-RENAME: If this was the first exchange (User + AI), generate a title
-      // updatedMessages has user msg (length 1 if started empty), plus we just added AI
       if (updatedMessages.length === 1) {
          generateSessionName(input, responseText).then(newName => {
             setSessions(prev => prev.map(s => 
@@ -228,6 +248,7 @@ const App: React.FC = () => {
       console.error(e); 
     } finally { 
       setIsProcessing(false); 
+      setStatusMessage('');
     }
   };
 
@@ -243,7 +264,7 @@ const App: React.FC = () => {
   const printableRoot = document.getElementById('printable-root');
 
   return (
-    <div className="min-h-screen bg-black text-white selection:bg-neon-green selection:text-black font-sans overflow-x-hidden">
+    <div className="min-h-screen bg-black text-white selection:bg-neon-green selection:text-black font-sans overflow-x-hidden flex flex-col md:block">
       <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
       
       <div className="md:hidden p-4 border-b border-white/10 flex justify-between items-center bg-black/80 backdrop-blur-md sticky top-0 z-50">
@@ -255,36 +276,55 @@ const App: React.FC = () => {
         <Settings size={20} />
       </button>
 
-      <main className="md:ml-64 p-4 md:p-8 pt-6 pb-24 max-w-7xl mx-auto min-h-screen">
-        <div className="md:hidden flex gap-2 mb-6 overflow-x-auto pb-2 scrollbar-hide">
+      <main className="flex-1 md:ml-64 p-3 md:p-8 pt-4 md:pt-6 max-w-7xl mx-auto w-full md:min-h-screen flex flex-col">
+        <div className="md:hidden flex gap-2 mb-4 overflow-x-auto pb-2 scrollbar-hide shrink-0">
           {[{ id: 'dashboard', label: 'Dashboard' }, { id: 'chat', label: 'Chat' }, { id: 'medication', label: 'Meds' }].map(t => (
             <button key={t.id} onClick={() => setActiveTab(t.id as any)} className={`px-5 py-2 rounded-full text-xs font-bold uppercase tracking-wide whitespace-nowrap transition-colors ${activeTab === t.id ? 'bg-neon-green text-black' : 'bg-gray-900 text-gray-400'}`}>{t.label}</button>
           ))}
         </div>
 
-        {activeTab === 'dashboard' && (
-          <Dashboard vitals={vitals} setVitals={setVitals} riskResult={riskResult} chatSummary={chatSummary} handleRunAnalysis={handleRunAnalysis} isAnalyzing={isAnalyzing} onPrint={handlePrintReport} profile={profile} setProfile={setProfile} medications={medications} chatHistory={chatHistory} insights={insights} />
-        )}
-        {activeTab === 'chat' && (
-          <Chat 
-            sessions={sessions}
-            currentSessionId={currentSessionId}
-            onSwitchSession={setCurrentSessionId}
-            onCreateSession={createNewSession}
-            onRenameSession={renameSession}
-            onDeleteSession={deleteSession}
-            onSendMessage={handleSendMessage} 
-            isProcessing={isProcessing} 
-            mode={mode} 
-            setMode={setMode} 
-            onSummarize={handleSummarizeChat} 
-            isSummarizing={isSummarizing} 
-            chatSummary={chatSummary} 
-          />
-        )}
-        {activeTab === 'medication' && (
-          <MedicationTracker medications={medications} setMedications={setMedications} profile={profile} setProfile={setProfile} />
-        )}
+        {/* Content fills remaining vertical space */}
+        <div className="flex-1 min-h-0 flex flex-col">
+          {activeTab === 'dashboard' && (
+            <Dashboard 
+              vitals={vitals} 
+              setVitals={setVitals} 
+              riskResult={riskResult} 
+              chatSummary={chatSummary} 
+              handleRunAnalysis={handleRunAnalysis} 
+              isAnalyzing={isAnalyzing} 
+              onPrint={handlePrintReport} 
+              profile={profile} 
+              setProfile={setProfile} 
+              medications={medications} 
+              chatHistory={chatHistory} 
+              insights={insights}
+              statusMessage={statusMessage}      
+              setStatusMessage={setStatusMessage} 
+            />
+          )}
+          {activeTab === 'chat' && (
+            <Chat 
+              sessions={sessions}
+              currentSessionId={currentSessionId}
+              onSwitchSession={setCurrentSessionId}
+              onCreateSession={createNewSession}
+              onRenameSession={renameSession}
+              onDeleteSession={deleteSession}
+              onSendMessage={handleSendMessage} 
+              isProcessing={isProcessing} 
+              statusMessage={statusMessage}      
+              mode={mode} 
+              setMode={setMode} 
+              onSummarize={handleSummarizeChat} 
+              isSummarizing={isSummarizing} 
+              chatSummary={chatSummary} 
+            />
+          )}
+          {activeTab === 'medication' && (
+            <MedicationTracker medications={medications} setMedications={setMedications} profile={profile} setProfile={setProfile} />
+          )}
+        </div>
       </main>
 
       {showSettings && (

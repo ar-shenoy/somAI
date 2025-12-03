@@ -18,6 +18,8 @@ interface DashboardProps {
   medications: Medication[];
   chatHistory: ChatMessage[];
   insights: HealthInsights | null;
+  statusMessage?: string; // New
+  setStatusMessage: (msg: string) => void; // New
 }
 
 // --- ANOMALY DETECTION LOGIC ---
@@ -74,7 +76,7 @@ const VitalInput = ({ label, value, onChange, type, unit }: { label: string, val
 };
 
 const Dashboard: React.FC<DashboardProps> = ({ 
-  vitals, setVitals, riskResult, chatSummary, handleRunAnalysis, isAnalyzing, onPrint, profile, setProfile, medications, chatHistory, insights
+  vitals, setVitals, riskResult, chatSummary, handleRunAnalysis, isAnalyzing, onPrint, profile, setProfile, medications, chatHistory, insights, statusMessage, setStatusMessage
 }) => {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [localProfile, setLocalProfile] = useState(profile);
@@ -92,22 +94,25 @@ const Dashboard: React.FC<DashboardProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     setIsExtracting(true);
+    setStatusMessage('Reading document...');
     const reader = new FileReader();
     reader.onloadend = async () => {
       try {
-        const extracted = await extractClinicalData(reader.result as string);
+        const extracted = await extractClinicalData(reader.result as string, setStatusMessage);
         if (extracted.vitals) {
            setVitals(prev => {
              const newVitals = { ...prev };
              if (extracted.vitals?.systolicBp) {
-                 newVitals.systolicBpMorning = extracted.vitals.systolicBp; 
-                 newVitals.systolicBpEvening = extracted.vitals.systolicBp;
+                 const bp = Number(extracted.vitals.systolicBp);
+                 newVitals.systolicBpMorning = bp; 
+                 newVitals.systolicBpEvening = bp;
              }
-             if (extracted.vitals?.glucose) newVitals.glucose = extracted.vitals.glucose;
-             if (extracted.vitals?.heartRate) newVitals.heartRate = extracted.vitals.heartRate;
-             if (extracted.vitals?.weight) newVitals.weight = extracted.vitals.weight;
-             if (extracted.vitals?.temperature) newVitals.temperature = extracted.vitals.temperature;
-             if (extracted.vitals?.spo2) newVitals.spo2 = extracted.vitals.spo2;
+             if (extracted.vitals?.glucose) newVitals.glucose = Number(extracted.vitals.glucose);
+             if (extracted.vitals?.heartRate) newVitals.heartRate = Number(extracted.vitals.heartRate);
+             if (extracted.vitals?.weight) newVitals.weight = Number(extracted.vitals.weight);
+             if (extracted.vitals?.temperature) newVitals.temperature = Number(extracted.vitals.temperature);
+             if (extracted.vitals?.spo2) newVitals.spo2 = Number(extracted.vitals.spo2);
+             
              const newNote = extracted.vitals?.clinicalNote || "";
              if (newNote) newVitals.clinicalNote = prev.clinicalNote ? prev.clinicalNote + "\n\n[Extracted]: " + newNote : "[Extracted]: " + newNote;
              return newVitals;
@@ -119,7 +124,11 @@ const Dashboard: React.FC<DashboardProps> = ({
         }
         alert("✨ Magic Upload Complete!");
       } catch (error) { alert("Could not extract data."); } 
-      finally { setIsExtracting(false); if (fileInputRef.current) fileInputRef.current.value = ''; }
+      finally { 
+        setIsExtracting(false); 
+        setStatusMessage('');
+        if (fileInputRef.current) fileInputRef.current.value = ''; 
+      }
     };
     reader.readAsDataURL(file);
   };
@@ -130,7 +139,6 @@ const Dashboard: React.FC<DashboardProps> = ({
 
   const daysSinceCheckup = Math.floor((new Date().getTime() - new Date(profile.lastCheckup).getTime()) / (1000 * 3600 * 24));
 
-  // Count anomalies for Alert Banner
   const anomalyCount = [
     getVitalStatus('systolicBp', vitals.systolicBpMorning),
     getVitalStatus('systolicBp', vitals.systolicBpEvening),
@@ -199,6 +207,7 @@ const Dashboard: React.FC<DashboardProps> = ({
                   </button>
                </div>
             </div>
+            {statusMessage && isExtracting && <div className="text-xs text-neon-green mb-2 animate-pulse font-mono">{statusMessage}</div>}
             
             <div className="space-y-4">
               {/* BP TREND: Morning vs Evening */}
@@ -288,6 +297,7 @@ const Dashboard: React.FC<DashboardProps> = ({
                    <div className="flex-1 bg-white/5 p-5 rounded-xl border border-white/5">
                       <h4 className="text-xs text-neon-blue font-bold uppercase mb-2">Assessment</h4>
                       <p className="text-sm text-gray-200 leading-relaxed">{riskResult.summary}</p>
+                      {statusMessage && isAnalyzing && <p className="text-xs text-neon-green mt-2 animate-pulse">{statusMessage}</p>}
                    </div>
                 </div>
                 
@@ -317,6 +327,7 @@ const Dashboard: React.FC<DashboardProps> = ({
               <div className="flex-1 flex flex-col items-center justify-center text-gray-600 border-2 border-dashed border-white/10 rounded-xl bg-black/20">
                 <Activity size={48} className="mb-4 opacity-30" />
                 <p className="font-medium text-lg text-gray-500">Awaiting Clinical Data</p>
+                {statusMessage && isAnalyzing && <p className="text-xs text-neon-green mt-2 animate-pulse">{statusMessage}</p>}
               </div>
             )}
           </div>

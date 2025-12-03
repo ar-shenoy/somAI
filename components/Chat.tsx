@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { MessageSquare, Send, ClipboardList, Activity, Mic, Volume2, Camera, X, ArrowLeft, Sparkles, ScanEye, Zap, Server, Plus, Trash2, Edit2, MessageCircle, Save } from 'lucide-react';
+import { MessageSquare, Send, ClipboardList, Activity, Mic, Volume2, Camera, X, ArrowLeft, Sparkles, ScanEye, Zap, Server, Plus, Trash2, Edit2, MessageCircle, Save, Loader2, ArrowDown } from 'lucide-react';
 import { ChatMessage, AppMode, ChatSession } from '../types';
-import { generateQuickReplies } from '../services/geminiService';
+import { generateQuickReplies, generateSpeech } from '../services/geminiService';
 
 interface ChatProps {
   sessions: ChatSession[];
@@ -12,6 +12,7 @@ interface ChatProps {
   onDeleteSession: (id: string) => void;
   onSendMessage: (input: string, image?: string) => void;
   isProcessing: boolean;
+  statusMessage?: string; // New prop for transparency
   mode: AppMode;
   setMode: (mode: AppMode) => void;
   onSummarize: () => void;
@@ -28,6 +29,7 @@ const Chat: React.FC<ChatProps> = ({
   onDeleteSession,
   onSendMessage,
   isProcessing,
+  statusMessage,
   mode,
   setMode,
   onSummarize,
@@ -35,18 +37,25 @@ const Chat: React.FC<ChatProps> = ({
   chatSummary
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   
   const [currentInput, setCurrentInput] = useState('');
   const [isListening, setIsListening] = useState(false);
+  
+  // TTS State
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [isGeneratingAudio, setIsGeneratingAudio] = useState<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+
   const [viewMode, setViewMode] = useState<'chat' | 'summary'>('chat');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [quickReplies, setQuickReplies] = useState<string[]>([]);
   const [showVisionTip, setShowVisionTip] = useState(true);
+  const [showScrollDown, setShowScrollDown] = useState(false);
   
-  // Sidebar logic for mobile
   const [showSidebar, setShowSidebar] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -54,14 +63,35 @@ const Chat: React.FC<ChatProps> = ({
   const currentSession = sessions.find(s => s.id === currentSessionId) || sessions[0];
   const chatHistory = currentSession?.messages || [];
 
-  // AUTO SCROLL
+  // RESOURCE MANAGEMENT: Stop Audio on Page Hide
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stopAudio();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
+  // SCROLL LOGIC
+  const scrollToBottom = (smooth = true) => {
     if (scrollRef.current) {
-      scrollRef.current.scrollIntoView({ behavior: 'smooth' });
+      scrollRef.current.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' });
     }
+  };
+
+  const handleScroll = () => {
+    if (!containerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    const isNotAtBottom = scrollHeight - scrollTop - clientHeight > 300;
+    setShowScrollDown(isNotAtBottom);
+  };
+
+  useEffect(() => {
+    scrollToBottom();
   }, [chatHistory, isProcessing, quickReplies]);
 
-  // Context-aware suggestions
   useEffect(() => {
     if (chatHistory.length > 0 && !isProcessing) {
       generateQuickReplies(chatHistory).then(setQuickReplies);
@@ -70,7 +100,6 @@ const Chat: React.FC<ChatProps> = ({
     }
   }, [chatHistory, isProcessing]);
 
-  // Focus input when editing starts
   useEffect(() => {
     if (editingSessionId && editInputRef.current) {
       editInputRef.current.focus();
@@ -102,18 +131,102 @@ const Chat: React.FC<ChatProps> = ({
     setQuickReplies([]);
   };
 
-  const speakText = (text: string, id: string) => {
+  // --- TTS ENGINE ---
+  const stopAudio = () => {
+    if (sourceNodeRef.current) {
+      sourceNodeRef.current.stop();
+      sourceNodeRef.current = null;
+    }
     if ('speechSynthesis' in window) {
-       if (speakingId === id) {
-         window.speechSynthesis.cancel();
-         setSpeakingId(null);
-         return;
+      window.speechSynthesis.cancel();
+    }
+    setSpeakingId(null);
+  };
+
+  const browserTTS = (text: string, id: string) => {
+    if ('speechSynthesis' in window) {
+       const speak = () => {
+           const utterance = new SpeechSynthesisUtterance(text);
+           const voices = window.speechSynthesis.getVoices();
+           
+           const maleVoice = voices.find(v => 
+               v.name.includes('Google US English Male') || 
+               v.name.includes('Microsoft David') || 
+               v.name.includes('Daniel') ||
+               (v.name.includes('Male') && v.lang.includes('en'))
+           );
+           const anyEnglish = voices.find(v => v.lang.includes('en-US'));
+
+           if (maleVoice) utterance.voice = maleVoice;
+           else if (anyEnglish) utterance.voice = anyEnglish;
+           
+           utterance.rate = 1.05; 
+           utterance.pitch = 0.95;
+
+           utterance.onend = () => setSpeakingId(null);
+           utterance.onerror = () => setSpeakingId(null);
+           setSpeakingId(id);
+           window.speechSynthesis.speak(utterance);
+       };
+
+       if (window.speechSynthesis.getVoices().length === 0) {
+           window.speechSynthesis.onvoiceschanged = speak;
+       } else {
+           speak();
        }
-       window.speechSynthesis.cancel();
-       const utterance = new SpeechSynthesisUtterance(text);
-       utterance.onend = () => setSpeakingId(null);
-       setSpeakingId(id);
-       window.speechSynthesis.speak(utterance);
+    } else {
+       alert("TTS not supported.");
+    }
+  };
+
+  const speakText = async (text: string, id: string) => {
+    if (speakingId === id) {
+      stopAudio();
+      return;
+    }
+    stopAudio();
+    setIsGeneratingAudio(id);
+    
+    try {
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error("Timeout")), 8000)
+        );
+
+        const base64Audio = await Promise.race([
+            generateSpeech(text),
+            timeoutPromise
+        ]);
+        
+        if (base64Audio && typeof base64Audio === 'string') {
+            const binaryString = window.atob(base64Audio);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            if (!audioContextRef.current) {
+                audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            }
+            
+            const audioBuffer = await audioContextRef.current.decodeAudioData(bytes.buffer);
+            const source = audioContextRef.current.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContextRef.current.destination);
+            
+            source.onended = () => setSpeakingId(null);
+            source.start(0);
+            
+            sourceNodeRef.current = source;
+            setSpeakingId(id);
+        } else {
+            throw new Error("No audio returned");
+        }
+    } catch (e) {
+        console.warn("TTS Fallback used.");
+        browserTTS(text, id);
+    } finally {
+        setIsGeneratingAudio(null);
     }
   };
 
@@ -157,8 +270,8 @@ const Chat: React.FC<ChatProps> = ({
 
   if (viewMode === 'summary') {
     return (
-      <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 h-full">
-         <div className="glass-panel rounded-2xl h-[calc(100vh-150px)] p-8 flex flex-col relative overflow-hidden">
+      <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 h-full flex flex-col pt-16 md:pt-0">
+         <div className="glass-panel rounded-2xl flex-1 p-8 flex flex-col relative overflow-hidden">
             <div className="absolute top-0 right-0 w-96 h-96 bg-neon-green/5 rounded-full blur-3xl -z-10 pointer-events-none"></div>
             <div className="flex justify-between items-center mb-6 border-b border-white/10 pb-4">
               <button onClick={() => setViewMode('chat')} className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors text-sm font-mono font-bold uppercase"><ArrowLeft size={16} /> Back to Chat</button>
@@ -176,19 +289,21 @@ const Chat: React.FC<ChatProps> = ({
     );
   }
 
+  // --- RESPONSIVE LAYOUT ---
   return (
-    <div className="flex gap-4 h-[calc(100vh-150px)] animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="flex gap-4 h-[calc(100vh-140px)] md:h-[calc(100vh-6rem)] animate-in fade-in slide-in-from-bottom-4 duration-500 relative">
       
       {/* SESSIONS SIDEBAR */}
-      <div className={`w-64 glass-panel rounded-2xl flex flex-col transition-all duration-300 ${showSidebar ? 'absolute z-40 h-full left-0 bg-black/95' : 'hidden md:flex'}`}>
-         <div className="p-4 border-b border-white/5">
-            <button onClick={onCreateSession} className="w-full flex items-center justify-center gap-2 bg-neon-blue/10 text-neon-blue hover:bg-neon-blue/20 py-2 rounded-xl font-bold text-xs transition-colors border border-neon-blue/30">
+      <div className={`w-64 glass-panel rounded-2xl flex flex-col transition-all duration-300 ${showSidebar ? 'absolute z-50 h-full left-0 bg-black/95 border-r border-white/20' : 'hidden md:flex'}`}>
+         <div className="p-4 border-b border-white/5 flex justify-between items-center">
+            <button onClick={onCreateSession} className="flex-1 flex items-center justify-center gap-2 bg-neon-blue/10 text-neon-blue hover:bg-neon-blue/20 py-2 rounded-xl font-bold text-xs transition-colors border border-neon-blue/30">
                <Plus size={14} /> New Chat
             </button>
+            {showSidebar && <button onClick={() => setShowSidebar(false)} className="md:hidden p-2 text-gray-500 hover:text-white ml-2"><X size={16}/></button>}
          </div>
          <div className="flex-1 overflow-y-auto p-2 space-y-1">
             {sessions.map(s => (
-               <div key={s.id} className={`group flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-all ${s.id === currentSessionId ? 'bg-white/10 text-white' : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'}`} onClick={() => onSwitchSession(s.id)}>
+               <div key={s.id} className={`group flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-all ${s.id === currentSessionId ? 'bg-white/10 text-white' : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'}`} onClick={() => { onSwitchSession(s.id); setShowSidebar(false); }}>
                   <MessageCircle size={14} className={s.id === currentSessionId ? 'text-neon-green' : 'opacity-50'} />
                   {editingSessionId === s.id ? (
                      <div className="flex-1 flex items-center gap-1" onClick={e => e.stopPropagation()}>
@@ -214,28 +329,31 @@ const Chat: React.FC<ChatProps> = ({
                </div>
             ))}
          </div>
-         {/* Mobile Close */}
-         {showSidebar && <button onClick={() => setShowSidebar(false)} className="md:hidden absolute top-2 right-2 p-2 text-gray-500"><X size={16}/></button>}
       </div>
 
       {/* CHAT AREA */}
-      <div className="flex-1 glass-panel rounded-2xl flex flex-col relative overflow-hidden">
-        {/* Header */}
-        <div className="p-4 bg-white/5 border-b border-white/5 flex justify-between items-center z-10">
+      <div className="flex-1 glass-panel rounded-2xl flex flex-col relative overflow-hidden min-h-0">
+        
+        {/* FIXED HEADER FOR MOBILE */}
+        <div className="absolute top-0 left-0 right-0 bg-black/80 backdrop-blur-md border-b border-white/10 p-3 z-40 flex justify-between items-center md:static md:bg-white/5 md:border-white/5 md:p-4">
           <div className="flex items-center gap-3">
-             <button onClick={() => setShowSidebar(!showSidebar)} className="md:hidden p-2 bg-white/5 rounded-lg text-gray-400"><MessageSquare size={16}/></button>
+             <button onClick={() => setShowSidebar(!showSidebar)} className="md:hidden p-2 bg-white/10 rounded-lg text-gray-300 hover:bg-white/20"><MessageSquare size={18}/></button>
              <div className="flex gap-2">
-                <button onClick={() => setMode(AppMode.GENERAL)} className={`px-3 py-1.5 rounded-lg text-[10px] md:text-xs font-mono font-bold uppercase tracking-wider transition-all ${mode === AppMode.GENERAL ? 'bg-neon-blue text-black' : 'text-gray-400 hover:text-white'}`}>Medical Guide</button>
-                <button onClick={() => setMode(AppMode.THERAPY)} className={`px-3 py-1.5 rounded-lg text-[10px] md:text-xs font-mono font-bold uppercase tracking-wider transition-all ${mode === AppMode.THERAPY ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}>Therapist (CBT)</button>
+                <button onClick={() => setMode(AppMode.GENERAL)} className={`px-2 py-1.5 md:px-3 rounded-lg text-[10px] md:text-xs font-mono font-bold uppercase tracking-wider transition-all ${mode === AppMode.GENERAL ? 'bg-neon-blue text-black' : 'text-gray-400 hover:text-white bg-white/5'}`}>Medical Guide</button>
+                <button onClick={() => setMode(AppMode.THERAPY)} className={`px-2 py-1.5 md:px-3 rounded-lg text-[10px] md:text-xs font-mono font-bold uppercase tracking-wider transition-all ${mode === AppMode.THERAPY ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white bg-white/5'}`}>Therapist</button>
              </div>
           </div>
-          <button onClick={handleSummarizeClick} disabled={chatHistory.length === 0} className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-bold transition-all border border-white/10 text-gray-300 hover:text-white hover:border-white/30 bg-white/5 disabled:opacity-50">
+          <button onClick={handleSummarizeClick} disabled={chatHistory.length === 0} className="flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 rounded-lg text-xs font-mono font-bold transition-all border border-white/10 text-gray-300 hover:text-white hover:border-white/30 bg-white/5 disabled:opacity-50">
             <ClipboardList size={16} /> <span className="hidden md:inline">BRIEF</span>
           </button>
         </div>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 relative">
+        {/* MESSAGES */}
+        <div 
+            className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 relative scroll-smooth pt-16 md:pt-4" 
+            ref={containerRef}
+            onScroll={handleScroll}
+        >
           {chatHistory.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-gray-600">
                <div className="p-4 rounded-full bg-white/5 mb-4 relative">
@@ -265,9 +383,14 @@ const Chat: React.FC<ChatProps> = ({
                       {msg.modelUsed.includes('Gemini') ? <><Zap size={10} className="text-neon-yellow"/> {msg.modelUsed}</> : <><Server size={10} className="text-neon-red"/> {msg.modelUsed}</>}
                    </div>
                 )}
+                
                 {msg.role === 'model' && !isProcessing && (
-                  <button onClick={() => speakText(msg.text, msg.id)} className={`absolute -right-10 top-2 p-2 rounded-full hover:bg-white/10 transition-all ${speakingId === msg.id ? 'text-neon-blue opacity-100' : 'text-gray-500 opacity-0 group-hover:opacity-100'}`}>
-                     <Volume2 size={16} className={speakingId === msg.id ? "animate-pulse" : ""} />
+                  <button 
+                    onClick={() => speakText(msg.text, msg.id)}
+                    className={`absolute -right-10 top-2 p-2 rounded-full hover:bg-white/10 transition-all ${speakingId === msg.id ? 'text-neon-blue opacity-100' : 'text-gray-500 opacity-0 group-hover:opacity-100'}`}
+                    disabled={isGeneratingAudio === msg.id}
+                  >
+                     {isGeneratingAudio === msg.id ? <Loader2 size={16} className="animate-spin text-neon-blue" /> : <Volume2 size={16} className={speakingId === msg.id ? "animate-pulse" : ""} />}
                   </button>
                 )}
               </div>
@@ -283,7 +406,7 @@ const Chat: React.FC<ChatProps> = ({
                       <div className="w-2 h-2 bg-neon-green rounded-full animate-bounce [animation-delay:-0.15s]"></div>
                       <div className="w-2 h-2 bg-neon-green rounded-full animate-bounce"></div>
                    </div>
-
+                   {statusMessage && <span className="text-xs text-gray-400 font-mono animate-pulse">{statusMessage}</span>}
                 </div>
              </div>
           )}
@@ -291,9 +414,19 @@ const Chat: React.FC<ChatProps> = ({
           <div ref={scrollRef}></div>
         </div>
 
+        {showScrollDown && (
+            <button 
+                onClick={() => scrollToBottom()}
+                className="absolute bottom-32 right-6 z-30 p-3 rounded-full bg-neon-green text-black shadow-lg hover:bg-white transition-all animate-bounce"
+                title="Scroll to bottom"
+            >
+                <ArrowDown size={20} />
+            </button>
+        )}
+
         {/* Quick Replies */}
         {!isProcessing && quickReplies.length > 0 && (
-          <div className="px-4 pb-2 flex gap-2 overflow-x-auto scrollbar-hide">
+          <div className="px-4 pb-2 flex gap-2 overflow-x-auto scrollbar-hide shrink-0">
             {quickReplies.map((reply, i) => (
               <button key={i} onClick={() => { setCurrentInput(reply); handleSend(); }} className="whitespace-nowrap px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs text-gray-300 hover:bg-neon-blue/20 hover:text-neon-blue hover:border-neon-blue/30 transition-all flex items-center gap-1">
                 <Sparkles size={10} /> {reply}
@@ -302,8 +435,7 @@ const Chat: React.FC<ChatProps> = ({
           </div>
         )}
 
-        {/* Input Area */}
-        <div className="p-4 bg-black/50 border-t border-white/5 z-20 relative">
+        <div className="p-4 bg-black/50 border-t border-white/5 z-20 relative shrink-0">
           {showVisionTip && !selectedImage && (
              <div className="absolute -top-12 left-4 z-30 animate-in fade-in slide-in-from-bottom-2">
                 <div className="bg-neon-blue/10 backdrop-blur-md border border-neon-blue/30 text-neon-blue text-[10px] md:text-xs px-3 py-2 rounded-lg shadow-lg flex items-center gap-2">

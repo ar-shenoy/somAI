@@ -1,7 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { PatientProfile, ClinicalVitals, AppMode, RiskAnalysisResult, ChatMessage, ExtractionResult, HealthInsights } from "../types";
 
-// --- API KEY & CLIENT INITIALIZATION ---
+// --- API KEY & CONFIG ---
 const getApiKey = () => {
   try {
     // @ts-ignore
@@ -17,13 +17,34 @@ const getApiKey = () => {
   return '';
 };
 
+// --- BACKEND CONFIGURATION ---
+// Primary Backend (Text Logic - Phi-3)
+const PRIMARY_API_BASE = 'https://arshenoy-somai-backend.hf.space';
+
+// Secondary Backend (Media - Moondream/Whisper)
+// If you create a new space, put its URL here (e.g. via VITE_MEDIA_API_URL env var), 
+// otherwise it defaults to the primary one.
+const getMediaApiBase = () => {
+  try {
+    // @ts-ignore
+    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_MEDIA_API_URL) {
+      // @ts-ignore
+      return import.meta.env.VITE_MEDIA_API_URL;
+    }
+  } catch (e) {}
+  return PRIMARY_API_BASE;
+};
+
+const MEDIA_API_BASE = getMediaApiBase();
+
 const API_KEY = getApiKey();
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
-const MODEL_FAST = 'gemini-2.5-flash';
-const FALLBACK_API_BASE = 'https://arshenoy-somai-backend.hf.space';
+// --- TIERED MODEL STRATEGY ---
+const MODEL_TIER_1 = 'gemini-2.5-flash-lite'; 
+const MODEL_TIER_2 = 'gemini-2.5-flash'; 
+const MODEL_TTS = 'gemini-2.5-flash-preview-tts';
 
-// Cleaning for final blocks
 const cleanText = (text: string) => {
   if (!text) return "";
   return text.replace(/\*\*/g, '').replace(/###/g, '').replace(/\*/g, '-').trim();
@@ -37,12 +58,10 @@ const compressImage = async (base64Str: string, maxWidth = 800): Promise<string>
       const canvas = document.createElement('canvas');
       let width = img.width;
       let height = img.height;
-      
       if (width > maxWidth) {
         height = (height * maxWidth) / width;
         width = maxWidth;
       }
-      
       canvas.width = width;
       canvas.height = height;
       const ctx = canvas.getContext('2d');
@@ -55,19 +74,26 @@ const compressImage = async (base64Str: string, maxWidth = 800): Promise<string>
 
 export const wakeUpBackend = async () => {
   try {
-    await fetch(`${FALLBACK_API_BASE}/`, { method: 'GET', mode: 'cors' });
+    // Ping both potential backends
+    fetch(`${PRIMARY_API_BASE}/`, { method: 'GET', mode: 'cors' }).catch(()=>{});
+    if (PRIMARY_API_BASE !== MEDIA_API_BASE) {
+      fetch(`${MEDIA_API_BASE}/`, { method: 'GET', mode: 'cors' }).catch(()=>{});
+    }
   } catch (e) {}
 };
 
-const callFallbackAPI = async (endpoint: string, payload: any): Promise<string> => {
-  console.info(`[SomAI System] Switching to Fallback API: ${FALLBACK_API_BASE}${endpoint}`);
+// Generic Fallback Caller
+const callBackend = async (baseUrl: string, endpoint: string, payload: any, onStatus?: (msg: string) => void): Promise<string> => {
+  const url = `${baseUrl}${endpoint}`;
+  console.info(`[SomAI] Calling Backend: ${url}`);
+  if (onStatus) onStatus("🐢 Switching to local backup...");
   
   const makeRequest = async (retries = 2) => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); 
+    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for CPU
     
     try {
-      const response = await fetch(`${FALLBACK_API_BASE}${endpoint}`, {
+      const response = await fetch(url, {
         method: 'POST',
         mode: 'cors', 
         credentials: 'omit',
@@ -78,6 +104,7 @@ const callFallbackAPI = async (endpoint: string, payload: any): Promise<string> 
       clearTimeout(timeoutId);
 
       if (!response.ok && (response.status === 503 || response.status === 504) && retries > 0) {
+        if (onStatus) onStatus(`💤 Backend waking up... (${retries} retries left)`);
         await new Promise(r => setTimeout(r, 5000));
         return makeRequest(retries - 1);
       }
@@ -99,6 +126,7 @@ const callFallbackAPI = async (endpoint: string, payload: any): Promise<string> 
     } catch (error: any) {
       clearTimeout(timeoutId);
       if (retries > 0 && (error.name === 'AbortError' || error.message.includes('Failed'))) {
+         if (onStatus) onStatus("📡 Connection unstable, retrying...");
          await new Promise(r => setTimeout(r, 5000));
          return makeRequest(retries - 1);
       }
@@ -145,19 +173,18 @@ const parseRiskResponse = (text: string, calculatedScore: number): RiskAnalysisR
   }
 };
 
-export const extractClinicalData = async (imageBase64: string): Promise<ExtractionResult> => {
+// --- VISION EXTRACTION ---
+export const extractClinicalData = async (imageBase64: string, onStatus?: (msg: string) => void): Promise<ExtractionResult> => {
   const base64Data = imageBase64.includes('base64,') ? imageBase64.split('base64,')[1] : imageBase64;
-  const prompt = `Analyze medical image. Extract JSON: { name, age, condition, history, allergies, systolicBp, glucose, heartRate, weight, temperature, spo2, clinicalNote }. Return JSON only.`;
+  const prompt = `Analyze this medical document. CRITICAL: Look for Patient Name. Extract JSON: { name, age, condition, history, allergies, systolicBp, glucose, heartRate, weight, temperature, spo2, clinicalNote }. Return JSON only.`;
   
-  try {
-    if (!API_KEY) throw new Error("API Key missing");
-    
+  const callGeminiVision = async (modelName: string) => {
+    if (onStatus) onStatus(`⚡ Scanning with ${modelName}...`);
     const response = await ai.models.generateContent({
-      model: MODEL_FAST,
+      model: modelName,
       contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64Data } }] }],
       config: { responseMimeType: "application/json", maxOutputTokens: 2000 }
     });
-    
     const text = response.text || "{}";
     const data = JSON.parse(text);
     return {
@@ -165,21 +192,52 @@ export const extractClinicalData = async (imageBase64: string): Promise<Extracti
       vitals: { systolicBp: data.systolicBp, glucose: data.glucose, heartRate: data.heartRate, weight: data.weight, temperature: data.temperature, spo2: data.spo2, clinicalNote: data.clinicalNote },
       confidence: 0.9
     };
+  };
 
+  try {
+    if (!API_KEY) throw new Error("API Key missing");
+    return await callGeminiVision(MODEL_TIER_1);
   } catch (e: any) { 
+    if (e.toString().includes('429') || e.toString().includes('Quota')) {
+        try {
+            return await callGeminiVision(MODEL_TIER_2);
+        } catch (e2) {}
+    }
+
+    // Fallback: Moondream on Media Backend
     try {
+        if (onStatus) onStatus("🐢 Compressing for Moondream...");
         const compressedBase64 = await compressImage(imageBase64);
         const cleanBase64 = compressedBase64.includes('base64,') ? compressedBase64.split('base64,')[1] : compressedBase64;
-        const resText = await callFallbackAPI('/vision', { image: cleanBase64, prompt: "Describe this medical document in detail, listing any numbers or patient names found." });
+        
+        if (onStatus) onStatus("🐢 Using Local Vision Node...");
+        const resText = await callBackend(MEDIA_API_BASE, '/vision', { image: cleanBase64, prompt: "Extract patient name and vitals from this document." }, onStatus);
         
         return {
             profile: {}, 
-            vitals: { clinicalNote: `[Auto-Scanned by SomAI Vision]: ${resText}` },
+            vitals: { clinicalNote: `[Auto-Scanned]: ${resText}` },
             confidence: 0.6
         }
     } catch (fallbackError) {
         throw new Error("Scan failed. Please type details manually."); 
     }
+  }
+};
+
+export const generateSpeech = async (text: string): Promise<string | null> => {
+  if (!API_KEY) return null;
+  try {
+    const response = await ai.models.generateContent({
+      model: MODEL_TTS,
+      contents: [{ parts: [{ text }] }],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Fenrir' } } },
+      },
+    });
+    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+  } catch (e) {
+    return null;
   }
 };
 
@@ -189,7 +247,8 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
         reader.onloadend = async () => {
             const base64 = (reader.result as string).split(',')[1];
             try {
-                const text = await callFallbackAPI('/transcribe', { audio: base64 });
+                // Whisper calls go to Media Backend
+                const text = await callBackend(MEDIA_API_BASE, '/transcribe', { audio: base64 });
                 resolve(text);
             } catch (e) { reject("Voice transcription failed."); }
         };
@@ -197,47 +256,59 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
     });
 };
 
-export const analyzeRisk = async (profile: PatientProfile, vitals: ClinicalVitals, calculatedScore: number): Promise<RiskAnalysisResult> => {
+// --- RISK ANALYSIS ---
+export const analyzeRisk = async (
+  profile: PatientProfile, 
+  vitals: ClinicalVitals, 
+  calculatedScore: number,
+  onStatus?: (msg: string) => void
+): Promise<RiskAnalysisResult> => {
   const prompt = `
     Act as a Senior Clinical Risk Assessor.
     Patient: ${profile.name} (${profile.age}, ${profile.gender}). Condition: ${profile.condition}.
-    History: ${profile.history}. Surgeries: ${profile.surgeries}. Family History: ${profile.familyHistory}.
-    Lifestyle: Diet-${profile.diet}, Exercise-${profile.exerciseFrequency}, Smoke-${profile.smokingStatus}, Alcohol-${profile.alcoholConsumption}.
-    Vitals: BP Morning ${vitals.systolicBpMorning} / Evening ${vitals.systolicBpEvening}. Glucose ${vitals.glucose}. HR ${vitals.heartRate}. SpO2 ${vitals.spo2}%. Temp ${vitals.temperature}F. Weight ${vitals.weight}kg.
+    History: ${profile.history}. 
+    Vitals: BP ${vitals.systolicBp}, Glucose ${vitals.glucose}, SpO2 ${vitals.spo2}%.
     Note: ${vitals.clinicalNote}.
-    Task: 1. Summary (Risk level). 2. 3 Action Items. 3. ICD-10 Pipeline (Condition, History, Symptoms). 4. Insurance Note.
+    Task: 1. Summary. 2. 3 Action Items. 3. ICD-10 Pipeline (Condition, History). 4. Insurance Note.
     Return JSON.
   `;
 
+  const callGeminiRisk = async (modelName: string) => {
+    if (onStatus) onStatus(`⚡ Analyzing with ${modelName}...`);
+    const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            maxOutputTokens: 4000,
+            responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+                summary: { type: Type.STRING },
+                actionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
+                primaryConditionCode: { type: Type.OBJECT, properties: { code: {type: Type.STRING}, description: {type: Type.STRING} } },
+                historyCodes: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { code: {type: Type.STRING}, description: {type: Type.STRING} } } },
+                insuranceNote: { type: Type.STRING }
+            },
+            required: ["summary", "actionItems", "primaryConditionCode", "historyCodes", "insuranceNote"]
+            }
+        }
+    });
+    return { ...parseRiskResponse(response.text || "{}", calculatedScore), source: modelName === MODEL_TIER_1 ? 'Gemini 2.5 Flash-Lite' : 'Gemini 2.5 Flash' };
+  };
+
   try {
     if (!API_KEY) throw new Error("API Key missing");
-    const response = await ai.models.generateContent({
-      model: MODEL_FAST,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        maxOutputTokens: 4000,
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            summary: { type: Type.STRING },
-            actionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
-            primaryConditionCode: { type: Type.OBJECT, properties: { code: {type: Type.STRING}, description: {type: Type.STRING} } },
-            historyCodes: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { code: {type: Type.STRING}, description: {type: Type.STRING} } } },
-            insuranceNote: { type: Type.STRING }
-          },
-          required: ["summary", "actionItems", "primaryConditionCode", "historyCodes", "insuranceNote"]
-        }
-      }
-    });
-    return { 
-      ...parseRiskResponse(response.text || "{}", calculatedScore),
-      source: 'Gemini 2.5 Flash' 
-    };
+    return await callGeminiRisk(MODEL_TIER_1);
   } catch (err: any) {
+    if (err.toString().includes('429') || err.toString().includes('Quota')) {
+        try { return await callGeminiRisk(MODEL_TIER_2); } catch (e2) {}
+    }
+
     try {
       const payload = { ...profile, ...vitals, riskScore: calculatedScore, prompt };
-      const fallback = await callFallbackAPI('/analyze', payload);
+      // Fallback goes to Primary Backend (Text Node)
+      const fallback = await callBackend(PRIMARY_API_BASE, '/analyze', payload, onStatus);
       return { 
         ...parseRiskResponse(fallback, calculatedScore),
         source: 'Phi-3 Mini (Fallback)' 
@@ -249,109 +320,99 @@ export const analyzeRisk = async (profile: PatientProfile, vitals: ClinicalVital
 };
 
 export const generateHealthInsights = async (profile: PatientProfile, vitals: ClinicalVitals): Promise<HealthInsights> => {
-  const prompt = `Based on Patient: ${profile.name}, ${profile.age}y, ${profile.condition}. Vitals: BP ${vitals.systolicBp}, SpO2 ${vitals.spo2}%. Generate JSON: { weeklySummary, progress, tips: [] }.`;
-  try {
-    if (!API_KEY) throw new Error("No Key");
+  const prompt = `Based on Patient: ${profile.name}, ${profile.age}y, ${profile.condition}. Vitals: BP ${vitals.systolicBp}. Generate JSON: { weeklySummary, progress, tips: [] }.`;
+  
+  const callGeminiInsights = async (model: string) => {
     const response = await ai.models.generateContent({
-      model: MODEL_FAST,
+      model: model,
       contents: prompt,
       config: { responseMimeType: "application/json", maxOutputTokens: 2000 }
     });
     return JSON.parse(response.text || "{}");
-  } catch {
+  }
+
+  try {
+    if (!API_KEY) throw new Error("No Key");
+    return await callGeminiInsights(MODEL_TIER_1);
+  } catch (err: any) {
+    if (err.toString().includes('429')) {
+        try { return await callGeminiInsights(MODEL_TIER_2); } catch (e) {}
+    }
     return { weeklySummary: "Keep tracking your vitals.", progress: "Data accumulated.", tips: ["Maintain a balanced diet.", "Stay hydrated."] };
   }
 };
 
 export const generateSessionName = async (userText: string, aiText: string): Promise<string> => {
-  const prompt = `Generate a very short, specific title (max 4 words) for a medical chat session based on this context. 
-  User: ${userText}
-  AI: ${aiText}
-  Title:`;
-  
+  const prompt = `Generate a very short, specific title (max 4 words) for a medical chat session based on this context. User: ${userText}. AI: ${aiText}. Title:`;
   try {
     if (!API_KEY) return "New Consultation";
-    const response = await ai.models.generateContent({
-      model: MODEL_FAST,
-      contents: prompt,
-      config: { maxOutputTokens: 20 }
-    });
+    const response = await ai.models.generateContent({ model: MODEL_TIER_1, contents: prompt, config: { maxOutputTokens: 20 } });
     return cleanText(response.text || "New Consultation").replace(/^["']|["']$/g, '');
   } catch (e) {
-    try {
-        const fallbackRes = await callFallbackAPI('/generate', { prompt: prompt });
-        return cleanText(fallbackRes).replace(/^["']|["']$/g, '');
-    } catch {
-        return "New Consultation";
-    }
+    return "New Consultation";
   }
 };
 
+// --- CHAT ---
 export const generateChatResponse = async (
   history: ChatMessage[], 
   currentMessage: string, 
   image: string | undefined, 
   profile: PatientProfile, 
   mode: AppMode,
-  onSource: (source: string) => void
+  onSource: (source: string) => void,
+  onStatus?: (msg: string) => void
 ): Promise<string> => {
   const context = `
     Patient: ${profile.name} (${profile.age}y).
     Condition: ${profile.condition}. History: ${profile.history}.
-    Surgeries: ${profile.surgeries}. Family Hx: ${profile.familyHistory}.
-    Lifestyle: ${profile.diet}, ${profile.exerciseFrequency}, Smoke: ${profile.smokingStatus}.
-    Emergency Contact: ${profile.emergencyContactName} (${profile.emergencyContactPhone}).
-    Tone: ${mode === AppMode.THERAPY ? 'Empathetic, calm, therapeutic (CBT).' : 'Professional, educational, clear.'}
+    Tone: ${mode === AppMode.THERAPY ? 'Empathetic CBT' : 'Medical Guide'}.
     Format: Plain text. No markdown.
   `;
   
   const contents = history.map(msg => ({ role: msg.role === 'user' ? 'user' : 'model', parts: [{ text: msg.text }, ...(msg.image ? [{ inlineData: { mimeType: 'image/jpeg', data: msg.image.split('base64,')[1] } }] : [])] }));
   contents.push({ role: 'user', parts: [{ text: context + "\nUser: " + currentMessage }, ...(image ? [{ inlineData: { mimeType: 'image/jpeg', data: image.split('base64,')[1] } }] : [])] });
 
+  const callGeminiChat = async (modelName: string) => {
+    if (onStatus) onStatus(`Generating with ${modelName}...`);
+    onSource(modelName === MODEL_TIER_1 ? 'Gemini 2.5 Flash-Lite' : 'Gemini 2.5 Flash'); 
+    const response = await ai.models.generateContent({
+        model: modelName,
+        contents: contents,
+        config: { maxOutputTokens: 4000, temperature: 0.7 }
+    });
+    return cleanText(response.text || "I didn't catch that.");
+  };
+
   try {
     if (!API_KEY) throw new Error("No Key");
-    
-    // 1. Try Gemini
-    onSource('Gemini 2.5 Flash'); 
-    const response = await ai.models.generateContent({
-      model: MODEL_FAST,
-      contents: contents,
-      config: {
-        maxOutputTokens: 4000,
-        temperature: 0.7
-      }
-    });
+    return await callGeminiChat(MODEL_TIER_1);
+  } catch (e: any) {
+    if (e.toString().includes('429') || e.toString().includes('Quota')) {
+        try {
+            return await callGeminiChat(MODEL_TIER_2);
+        } catch (e2) {}
+    }
 
-    return cleanText(response.text || "I didn't catch that.");
-
-  } catch (e) {
     try {
-      // 2. Fallback
+      if (onStatus) onStatus("Falling back to Local Phi-3...");
       onSource('Phi-3 Mini (Fallback)'); 
       const fallbackPrompt = `${context}\n\nChat History:\n${history.slice(-3).map(m => m.text).join('\n')}\nUser: ${currentMessage}`;
-      const responseText = await callFallbackAPI('/generate', { prompt: fallbackPrompt });
+      // Fallback goes to Primary Backend (Text Node)
+      const responseText = await callBackend(PRIMARY_API_BASE, '/generate', { prompt: fallbackPrompt }, onStatus);
       return cleanText(responseText);
-
     } catch { 
         return "I'm having trouble connecting. Please check your internet.";
     }
   }
 };
 
-// --- UPDATED: CONTEXT-AWARE QUICK REPLIES ---
 export const generateQuickReplies = async (history: ChatMessage[]) => {
   if (!API_KEY || history.length === 0) return [];
-  
-  // Use last 3 messages for context
   const recentContext = history.slice(-3).map(m => `${m.role}: ${m.text}`).join('\n');
-  const prompt = `Based on this conversation:\n${recentContext}\n\nSuggest 3 short, relevant follow-up questions the USER might want to ask next. Return ONLY a JSON array of strings.`;
-  
+  const prompt = `Based on: ${recentContext}. Suggest 3 short follow-up questions. JSON array.`;
   try {
-    const res = await ai.models.generateContent({ 
-      model: MODEL_FAST, 
-      contents: prompt, 
-      config: { responseMimeType: "application/json" } 
-    });
+    const res = await ai.models.generateContent({ model: MODEL_TIER_1, contents: prompt, config: { responseMimeType: "application/json" } });
     return JSON.parse(res.text || "[]");
   } catch { return []; }
 };
@@ -359,7 +420,7 @@ export const generateQuickReplies = async (history: ChatMessage[]) => {
 export const summarizeConversation = async (history: ChatMessage[]) => {
   if (!API_KEY) return "Summary unavailable.";
   try {
-    const res = await ai.models.generateContent({ model: MODEL_FAST, contents: `Summarize clinical conversation:\n${history.map(m=>m.text).join('\n')}` });
+    const res = await ai.models.generateContent({ model: MODEL_TIER_1, contents: `Summarize:\n${history.map(m=>m.text).join('\n')}` });
     return cleanText(res.text || "");
   } catch { return "Could not summarize."; }
 };

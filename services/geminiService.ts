@@ -27,12 +27,14 @@ const MEDIA_BACKEND_BASE: string = 'https://arshenoy-somai-media.hf.space';
 const API_KEY = getApiKey();
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
-// --- TIERED MODEL STRATEGY ---
+// --- TIERED MODEL STRATEGY (MAXIMIZE QUOTA) ---
 // 1. Primary: Gemini 2.5 Flash (Highest Quality/Speed Balance)
-// 2. Secondary: Gemini 2.5 Flash Lite (Quota Rescue / Higher Throughput)
-// 3. Tertiary: Local/HuggingFace Backends (Privacy/Offline/No-Quota Fallback)
+// 2. Secondary: Gemini 2.5 Flash Lite (Separate Quota Bucket)
+// 3. Tertiary: Gemini 2.5 Flash Lite Preview (Specific Snapshot Fallback)
+// 4. Quaternary: Local/HuggingFace Backends (Privacy/Offline/No-Quota Fallback)
 const MODEL_PRIMARY = 'gemini-2.5-flash'; 
-const MODEL_SECONDARY = 'gemini-2.5-flash-lite'; 
+const MODEL_SECONDARY = 'gemini-2.5-flash-lite';
+const MODEL_TERTIARY = 'gemini-2.5-flash-lite-preview'; 
 const MODEL_TTS = 'gemini-2.5-flash-tts';
 
 // --- UTILITIES ---
@@ -126,7 +128,7 @@ const callBackend = async (baseUrl: string, endpoint: string, payload: any, onSt
 };
 
 // --- PIPELINE MANAGER ---
-// Execute: Primary -> Secondary -> Specific Backend
+// Execute: Primary -> Secondary -> Tertiary -> Specific Backend
 async function executePipeline<T>(
     geminiTask: (model: string) => Promise<T>,
     fallbackTask: () => Promise<T>,
@@ -137,25 +139,32 @@ async function executePipeline<T>(
         return await fallbackTask();
     }
 
+    // Tier 1: Gemini 2.5 Flash
     try {
-        // 1. Primary Model
         if (onStatus) onStatus("⚡ Using Gemini 2.5 Flash...");
         return await geminiTask(MODEL_PRIMARY);
     } catch (error: any) {
-        // Check for Quota/Rate Limits or Model Overload
-        if (error.toString().includes('429') || error.toString().includes('Quota') || error.toString().includes('503')) {
-            try {
-                // 2. Secondary Model
-                if (onStatus) onStatus("⚠️ Quota limit. Switching to 2.5 Flash Lite...");
-                return await geminiTask(MODEL_SECONDARY);
-            } catch (secondaryError) {
-                console.warn("Secondary model failed:", secondaryError);
-            }
-        }
+        console.warn(`Tier 1 (${MODEL_PRIMARY}) failed:`, error.message);
         
-        // 3. Backend Fallback
-        if (onStatus) onStatus("🐢 Fallback to Custom Backend...");
-        return await fallbackTask();
+        // Tier 2: Gemini 2.5 Flash Lite
+        try {
+            if (onStatus) onStatus("⚠️ Switching to Gemini 2.5 Flash Lite...");
+            return await geminiTask(MODEL_SECONDARY);
+        } catch (tier2Error: any) {
+             console.warn(`Tier 2 (${MODEL_SECONDARY}) failed:`, tier2Error.message);
+
+             // Tier 3: Gemini 2.5 Flash Lite Preview (Snapshot)
+             try {
+                if (onStatus) onStatus("⚠️ Switching to Preview Snapshot...");
+                return await geminiTask(MODEL_TERTIARY);
+             } catch (tier3Error: any) {
+                console.warn(`Tier 3 (${MODEL_TERTIARY}) failed:`, tier3Error.message);
+                
+                // Tier 4: Hugging Face Backend (Phi-3 / Moondream)
+                if (onStatus) onStatus("🐢 Fallback to Custom Backend...");
+                return await fallbackTask();
+             }
+        }
     }
 }
 
@@ -221,7 +230,7 @@ export const generateSpeech = async (text: string): Promise<string | null> => {
       try {
           return await geminiTask();
       } catch (e) {
-          // Fallthrough
+          // Fallthrough to Browser
       }
   }
   return await fallbackTask();
@@ -295,7 +304,7 @@ export const analyzeRisk = async (
     });
     
     const parsed = parseRiskResponse(response.text || "{}", calculatedScore);
-    return { ...parsed, source: model === MODEL_PRIMARY ? 'Gemini 2.5 Flash' : 'Gemini 2.5 Flash Lite' };
+    return { ...parsed, source: model };
   };
 
   const fallbackTask = async () => {
@@ -329,7 +338,7 @@ export const generateChatResponse = async (
   contents.push({ role: 'user', parts: [{ text: context + "\nUser: " + currentMessage }, ...(image ? [{ inlineData: { mimeType: 'image/jpeg', data: image.split('base64,')[1] } }] : [])] });
 
   const geminiTask = async (model: string) => {
-    onSource(model === MODEL_PRIMARY ? 'Gemini 2.5 Flash' : 'Gemini 2.5 Flash Lite'); 
+    onSource(model); 
     const response = await ai.models.generateContent({
         model: model,
         contents: contents,
